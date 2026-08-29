@@ -13,7 +13,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
-from rest_framework_simplejwt.tokens import RefreshToken
+from accounts.jwt import issue_token_pair
 
 from payments.models import PaymentTransaction
 from subscriptions.models import Subscription, SubscriptionPlan
@@ -51,8 +51,7 @@ class PerformanceBaselineTest(TestCase):
         )
 
         # Generate JWT token
-        refresh = RefreshToken.for_user(self.user)
-        self.access_token = str(refresh.access_token)
+        self.access_token, _ = issue_token_pair(self.user)
 
     def _auth_headers(self):
         return {'HTTP_AUTHORIZATION': f'Bearer {self.access_token}'}

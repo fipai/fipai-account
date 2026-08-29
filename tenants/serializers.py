@@ -9,6 +9,8 @@ class TenantSerializer(serializers.ModelSerializer):
     owner_name = serializers.CharField(source='owner.name', read_only=True)
     owner_email = serializers.CharField(source='owner.email', read_only=True)
 
+    UPDATE_FIELDS = {'name', 'slug', 'domain', 'logo', 'description'}
+
     class Meta:
         model = Tenant
         fields = [
@@ -16,7 +18,21 @@ class TenantSerializer(serializers.ModelSerializer):
             'status', 'is_active', 'current_plan', 'logo', 'description',
             'max_users', 'max_api_calls', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'owner', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'owner', 'status', 'is_active', 'current_plan',
+            'max_users', 'max_api_calls', 'created_at', 'updated_at'
+        ]
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        if request and request.method in ('PUT', 'PATCH'):
+            disallowed_fields = set(self.initial_data) - self.UPDATE_FIELDS
+            if disallowed_fields:
+                raise serializers.ValidationError({
+                    field: 'This field cannot be updated through the tenant endpoint.'
+                    for field in sorted(disallowed_fields)
+                })
+        return attrs
 
 
 class TenantCreateSerializer(serializers.ModelSerializer):

@@ -13,6 +13,7 @@ class SubscriptionPlan(models.Model):
         ('datacognis', 'DataCognis 数据认知平台'),
         ('agenticorcha', 'AgenticOrcha 智能体编排平台'),
         ('decisionops', 'DecisionOps 智策运营平台'),
+        ('businessbuilder', 'BusinessBuilder 业务构建平台'),
     ]
 
     TIER_CHOICES = [

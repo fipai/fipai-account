@@ -135,3 +135,35 @@ ALIBABA_SMS_SANDBOX=false
 ## 数据库
 
 使用 SQLite 开发，PostgreSQL 生产（`USE_POSTGRES=true` 环境变量切换）
+
+## 支付回调并发验证
+
+支付回调通过 PostgreSQL `SELECT ... FOR UPDATE` 串行化同一订单的状态转换。执行 `python manage.py test tests.test_payment_concurrency` 可运行真实并发集成测试；测试在非 PostgreSQL 数据库上会明确跳过。本机 SQLite 不提供与 PostgreSQL 相同的行级锁语义，因此 SQLite 测试不能证明同单并发只激活一次。
+
+## 认证并发验证
+
+Refresh 轮换和 2FA challenge 消费通过 PostgreSQL `SELECT ... FOR UPDATE` 串行化。执行 `python manage.py test tests.test_auth_concurrency` 可运行并发集成测试；测试在非 PostgreSQL 数据库上会明确跳过。本机 SQLite 仅完成全部串行 Account 回归，不能证明 PostgreSQL 行级锁下的并发行为。
+
+## TOTP 加密密钥轮换
+
+轮换时只通过 secret manager/环境变量配置 active key 和 decrypt-only 旧 key，禁止把原始 key 放进命令行。先预检，再重封装，最后执行退役门禁：
+
+```bash
+python manage.py rewrap_totp_secrets --report
+python manage.py rewrap_totp_secrets --from-key-id account-totp-2026-01 --dry-run
+python manage.py rewrap_totp_secrets --from-key-id account-totp-2026-01 --batch-size 500
+python manage.py rewrap_totp_secrets --check-retirement account-totp-2026-01
+```
+
+只有退役门禁成功后，才能从 `TOTP_PREVIOUS_ENCRYPTION_KEYS` 删除旧 key。明文、未知 key、畸形或无法认证的密文都会使命令以非零状态退出；输出不会包含 key、明文或密文。
+
+## PostgreSQL 生产放行 gate
+
+使用一次性 PostgreSQL 实例并在启动进程前注入 `USE_POSTGRES=true`、`DB_NAME`、`DB_USER`、`DB_PASSWORD`、`DB_HOST`、`DB_PORT`。脚本不会打印密码，Django 测试运行器会创建并销毁测试数据库：
+
+```bash
+./scripts/postgres_gate.sh          # 并发与迁移专项测试
+./scripts/postgres_gate.sh --full   # PostgreSQL 上执行完整 Account 测试
+```
+
+可通过 `PYTHON_BIN=/absolute/path/to/python` 指定 Python。变量缺失、SQLite 配置、占位密码或无效端口会在连接前直接失败。

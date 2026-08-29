@@ -2,11 +2,12 @@ from typing import Optional
 
 from rest_framework import generics, status
 from rest_framework.response import Response
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenRefreshView
 from django.conf import settings
-from django.contrib.auth import get_user_model, authenticate, login
+from django.contrib.auth import get_user_model, authenticate
+from django.db import transaction
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -14,8 +15,11 @@ from django.utils import timezone
 from .serializers import (
     RegisterSerializer, UserSerializer,
     SendCodeSerializer, RegisterPhoneSerializer, LoginPhoneSerializer,
+    TenantSwitchSerializer,
 )
-from .models import SMSCode, TwoFactorAuth, AccountDeletionRequest
+from .models import (
+    SMSCode, TwoFactorAuth, AccountDeletionRequest, LoginChallenge,
+)
 from .sms import generate_code, get_sms_client, SMS_CODE_EXPIRE_MINUTES, SMS_DAILY_LIMIT
 from .authentication import CookieOrHeaderJWTAuthentication
 import accounts.totp_service as totp_service
@@ -26,6 +30,30 @@ from django.contrib.auth.hashers import check_password
 User = get_user_model()
 
 SSO_ACCESS_COOKIE_NAME = "fip_access_token"
+LOGIN_CHALLENGE_LIFETIME = timezone.timedelta(minutes=5)
+
+
+def _requires_two_factor(user) -> bool:
+    try:
+        return bool(user.two_factor_auth.enabled)
+    except TwoFactorAuth.DoesNotExist:
+        return False
+
+
+def _login_challenge_response(user) -> Response:
+    _, bearer = LoginChallenge.create_for_user(
+        user, lifetime=LOGIN_CHALLENGE_LIFETIME
+    )
+    return Response(
+        {
+            "requires_2fa": True,
+            "challenge": bearer,
+            "expires_in": int(LOGIN_CHALLENGE_LIFETIME.total_seconds()),
+        },
+        status=status.HTTP_202_ACCEPTED,
+    )
+
+
 SSO_REFRESH_COOKIE_NAME = "fip_refresh_token"
 
 
@@ -108,44 +136,11 @@ def _clear_sso_cookies(request, response: Response) -> None:
     response.delete_cookie(SSO_REFRESH_COOKIE_NAME, domain=domain, path="/")
 
 
-def add_custom_token_claims(refresh_token, user):
-    """
-    为 JWT token 添加自定义 claims
-    - tenant_id: 用户所属租户 ID
-    - product_scopes: 用户可访问的产品列表
-    - roles: 用户在租户中的角色
-    """
-    # 设置在 refresh_token 上（不是 access_token）
-    # RefreshToken.access_token 会从 refresh_token.token 复制 claims
-    refresh_token['tenant_id'] = None
-    refresh_token['product_scopes'] = []
-    refresh_token['roles'] = []
+def add_custom_token_claims(refresh_token, user, tenant_id=None):
+    """Backward-compatible entry point backed by centralized JWT helpers."""
+    from .jwt import add_custom_token_claims as apply_claims
 
-    from teams.models import TeamMember
-    membership = TeamMember.objects.filter(
-        user=user,
-        status='active'
-    ).select_related('tenant').first()
-
-    if membership:
-        refresh_token['tenant_id'] = membership.tenant_id
-        refresh_token['roles'] = [membership.role]
-
-        # 从订阅获取产品权限范围
-        active_subs = Subscription.objects.filter(
-            user=user,
-            status='active',
-            end_date__gt=timezone.now()
-        ).select_related('plan')
-
-        product_scopes = []
-        for sub in active_subs:
-            if sub.plan:
-                product_scopes.append(sub.plan.product)
-
-        refresh_token['product_scopes'] = list(set(product_scopes))
-
-    return refresh_token
+    return apply_claims(refresh_token, user, tenant_id=tenant_id)
 
 
 # =============================================================================
@@ -247,66 +242,69 @@ class RegisterPhoneView(generics.GenericAPIView):
         valid_code.save()
 
         # 生成 JWT
-        refresh = RefreshToken.for_user(user)
-        refresh = add_custom_token_claims(refresh, user)
+        from .jwt import issue_token_pair
 
+        access, refresh = issue_token_pair(user)
         response = Response({
-            'access': str(refresh.access_token),
-            'refresh': str(refresh),
+            'access': access,
+            'refresh': refresh,
         }, status=status.HTTP_201_CREATED)
-        _set_sso_cookies(request, response, str(refresh.access_token), str(refresh))
+        _set_sso_cookies(request, response, access, refresh)
         return response
 
 
 class LoginPhoneView(generics.GenericAPIView):
-    """
-    手机号登录: POST /api/auth/login/phone/
-    Body: { "phone": "13800000000", "code": "123456" }
-    """
+    """手机号第一因子登录；启用 2FA 时只返回一次性 challenge。"""
     permission_classes = [AllowAny]
     serializer_class = LoginPhoneSerializer
 
     def post(self, request):
-        serializer = LoginPhoneSerializer(data=request.data)
+        serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-
         phone = serializer.validated_data['phone']
         code = serializer.validated_data['code']
 
-        # 验证验证码
-        valid_code = SMSCode.objects.filter(
-            phone=phone,
-            code=code,
-            purpose='login',
-            is_used=False,
-            expires_at__gt=timezone.now(),
-        ).order_by('-created_at').first()
+        access = refresh = None
+        challenge_response = None
+        with transaction.atomic():
+            valid_code = (
+                SMSCode.objects.select_for_update()
+                .filter(
+                    phone=phone,
+                    code=code,
+                    purpose='login',
+                    is_used=False,
+                    expires_at__gt=timezone.now(),
+                )
+                .order_by('-created_at')
+                .first()
+            )
+            if valid_code is None:
+                return Response(
+                    {'error': '登录凭据无效'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        if not valid_code:
-            return Response({'error': '验证码无效或已过期'}, status=status.HTTP_400_BAD_REQUEST)
+            # A valid one-time SMS is consumed even if the account is unavailable.
+            valid_code.is_used = True
+            valid_code.save(update_fields=['is_used'])
+            user = User.objects.filter(username=phone, is_active=True).first()
+            if user is None:
+                return Response(
+                    {'error': '登录凭据无效'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        # 查找用户
-        try:
-            user = User.objects.get(username=phone)
-        except User.DoesNotExist:
-            return Response({'error': '用户不存在'}, status=status.HTTP_404_NOT_FOUND)
+            if _requires_two_factor(user):
+                challenge_response = _login_challenge_response(user)
+            else:
+                from .jwt import issue_token_pair
+                access, refresh = issue_token_pair(user)
 
-        if not user.is_active:
-            return Response({'error': '账号已被禁用'}, status=status.HTTP_403_FORBIDDEN)
-
-        # 标记验证码已使用
-        valid_code.is_used = True
-        valid_code.save()
-
-        # 生成 JWT
-        refresh = RefreshToken.for_user(user)
-        refresh = add_custom_token_claims(refresh, user)
-
-        response = Response({
-            'access': str(refresh.access_token),
-            'refresh': str(refresh),
-        })
-        _set_sso_cookies(request, response, str(refresh.access_token), str(refresh))
+        if challenge_response is not None:
+            return challenge_response
+        response = Response({'access': access, 'refresh': refresh})
+        _set_sso_cookies(request, response, access, refresh)
         return response
 
 
@@ -338,36 +336,112 @@ class RegisterView(generics.CreateAPIView):
 # =============================================================================
 
 @method_decorator(csrf_exempt, name='dispatch')
-class LoginView(TokenObtainPairView):
-    """
-    登录（密码）: POST /api/auth/login/
-    username 可以是手机号或邮箱
-    """
+class LoginView(generics.GenericAPIView):
+    """密码第一因子登录；任何 JWT 都只在完整认证后签发。"""
     permission_classes = [AllowAny]
 
     def post(self, request, *args, **kwargs):
-        response = super().post(request, *args, **kwargs)
+        identifier = request.data.get('username')
+        password = request.data.get('password')
+        user = None
+        if identifier and password:
+            user = authenticate(request=request, username=identifier, password=password)
+            if user is None:
+                # Preserve the documented email-login behavior without changing errors.
+                email_user = User.objects.filter(email=identifier).only('username').first()
+                if email_user is not None:
+                    user = authenticate(
+                        request=request,
+                        username=email_user.username,
+                        password=password,
+                    )
+        if user is None or not user.is_active:
+            return Response(
+                {'error': '登录凭据无效'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
 
-        if response.status_code == 200:
-            username = request.data.get('username')
-            password = request.data.get('password')
-            user = authenticate(username=username, password=password)
-            if user:
-                login(request, user)
-                request.session.cycle_key()
-            try:
-                access = response.data.get("access")
-                refresh = response.data.get("refresh")
-                _set_sso_cookies(request, response, access, refresh)
-            except Exception:
-                pass
+        if _requires_two_factor(user):
+            return _login_challenge_response(user)
 
+        from .jwt import issue_token_pair
+        access, refresh = issue_token_pair(user)
+        response = Response({'access': access, 'refresh': refresh})
+        _set_sso_cookies(request, response, access, refresh)
         return response
 
 
 # =============================================================================
 # 用户信息
 # =============================================================================
+
+class TenantListView(generics.GenericAPIView):
+    """List every tenant for which the current user has an active membership."""
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [CookieOrHeaderJWTAuthentication]
+
+    def get(self, request):
+        from .jwt import build_tenant_summary, get_active_tenant_memberships
+
+        memberships = get_active_tenant_memberships(request.user)
+        return Response([build_tenant_summary(membership) for membership in memberships])
+
+
+class TenantSwitchView(generics.GenericAPIView):
+    """Issue a fresh token pair scoped to an authorized tenant membership."""
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [CookieOrHeaderJWTAuthentication]
+    serializer_class = TenantSwitchSerializer
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        tenant_id = serializer.validated_data["tenant_id"]
+
+        from .jwt import (
+            build_tenant_claims,
+            get_active_tenant_membership,
+            issue_token_pair,
+        )
+
+        membership = get_active_tenant_membership(request.user, tenant_id=tenant_id)
+        if membership is None:
+            # Deliberately identical for missing and unauthorized tenant IDs.
+            return Response(
+                {"error": "租户不存在或无权访问"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        with transaction.atomic():
+            from .models import AuthSession
+
+            source_session = (
+                AuthSession.objects.select_for_update()
+                .filter(
+                    sid=request.auth.get("sid"),
+                    user=request.user,
+                    revoked_at__isnull=True,
+                    expires_at__gt=timezone.now(),
+                )
+                .first()
+            )
+            if source_session is None:
+                raise AuthenticationFailed("Token is invalid or expired.")
+
+            source_session.revoked_at = timezone.now()
+            source_session.revoked_reason = "tenant_switched"
+            source_session.save(
+                update_fields=["revoked_at", "revoked_reason", "updated_at"]
+            )
+            access, refresh = issue_token_pair(
+                request.user, tenant_id=membership.tenant_id
+            )
+
+        claims = build_tenant_claims(request.user, tenant_id=membership.tenant_id)
+        response = Response({"access": access, "refresh": refresh, **claims})
+        _set_sso_cookies(request, response, access, refresh)
+        return response
+
 
 class UserView(generics.RetrieveAPIView):
     """获取当前用户信息：GET /api/auth/me/（需 JWT）"""
@@ -417,8 +491,40 @@ class CookieTokenRefreshView(TokenRefreshView):
 
 class LogoutView(generics.GenericAPIView):
     permission_classes = [AllowAny]
+    authentication_classes = []
 
     def post(self, request):
+        data = request.data if getattr(request, "data", None) else {}
+        refresh_candidates = [
+            data.get("refresh"),
+            request.COOKIES.get(SSO_REFRESH_COOKIE_NAME),
+        ]
+
+        authorization = request.META.get("HTTP_AUTHORIZATION", "")
+        parts = authorization.split()
+        header_access = (
+            parts[1]
+            if len(parts) == 2 and parts[0].lower() == "bearer"
+            else None
+        )
+        access_candidates = [
+            data.get("access"),
+            header_access,
+            request.COOKIES.get(SSO_ACCESS_COOKIE_NAME),
+        ]
+
+        # Try every distinct credential. A malformed/stale cookie must not
+        # prevent a valid body/header token from revoking its server-side family.
+        from .jwt import (
+            revoke_auth_session_from_access_token,
+            revoke_auth_session_from_token,
+        )
+
+        for raw_refresh in dict.fromkeys(filter(None, refresh_candidates)):
+            revoke_auth_session_from_token(raw_refresh, reason="logout")
+        for raw_access in dict.fromkeys(filter(None, access_candidates)):
+            revoke_auth_session_from_access_token(raw_access, reason="logout")
+
         response = Response({"ok": True})
         _clear_sso_cookies(request, response)
         return response
@@ -528,7 +634,11 @@ class PasswordChangeView(generics.CreateAPIView):
         user.set_password(new_password)
         user.save()
 
-        return Response({'detail': '密码修改成功'})
+        from .jwt import revoke_all_auth_sessions
+        revoke_all_auth_sessions(user, reason='password_changed')
+        response = Response({'detail': '密码修改成功'})
+        _clear_sso_cookies(request, response)
+        return response
 
 
 # =============================================================================
@@ -568,8 +678,9 @@ class TwoFactorAuthSetupView(generics.GenericAPIView):
         secret = totp_service.generate_totp_secret()
         backup_codes = totp_service.generate_backup_codes()
 
-        # 保存到数据库（secret 和 backup_codes 都要哈希存储）
-        tfa.secret = secret
+        # Encrypt the TOTP seed with the active secret-managed key. Backup
+        # codes remain one-way SHA-256 hashes because they never need recovery.
+        tfa.set_totp_secret(secret)
         tfa.backup_codes = [totp_service.hash_backup_code(code) for code in backup_codes]
         tfa.enabled = False  # 初始设置为未启用，等待验证第一个代码
         tfa.method = 'totp'
@@ -586,65 +697,120 @@ class TwoFactorAuthSetupView(generics.GenericAPIView):
 
 
 class TwoFactorAuthVerifyView(generics.GenericAPIView):
-    """
-    验证 2FA 代码: POST /api/auth/2fa/verify/
-    用于启用时验证和登录时二次认证
-    """
-    permission_classes = [AllowAny]  # 登录时用户未认证
+    """Verify enrollment for an authenticated user or a one-time login challenge."""
+    permission_classes = [AllowAny]
+    authentication_classes = [CookieOrHeaderJWTAuthentication]
+
+    @staticmethod
+    def _invalid_response():
+        return Response(
+            {'error': '验证失败'}, status=status.HTTP_400_BAD_REQUEST
+        )
 
     def post(self, request):
-        # 支持两种模式：启用验证（需认证）和 登录验证（未认证）
-        user = request.user if request.user.is_authenticated else None
-
         code = request.data.get('code')
-        password = request.data.get('password')  # 用于启用 2FA 时的密码验证
+        if not isinstance(code, str) or not code:
+            return self._invalid_response()
 
-        if not code:
-            return Response({'error': '请提供验证码'}, status=status.HTTP_400_BAD_REQUEST)
-
-        if user:
-            # 已认证用户 - 启用 2FA 验证
-            tfa = TwoFactorAuth.objects.filter(user=user, enabled=False).first()
-            if not tfa or not tfa.secret:
-                return Response({'error': '请先设置 2FA'}, status=status.HTTP_400_BAD_REQUEST)
-
-            # 验证 TOTP 代码
-            if totp_service.verify_totp(tfa.secret, code):
+        bearer = request.data.get('challenge')
+        if request.user.is_authenticated and not bearer:
+            with transaction.atomic():
+                tfa = (
+                    TwoFactorAuth.objects.select_for_update()
+                    .filter(user=request.user, enabled=False)
+                    .first()
+                )
+                if not tfa or not tfa.secret:
+                    return self._invalid_response()
+                try:
+                    valid = totp_service.verify_totp(tfa.get_totp_secret(), code)
+                except Exception:
+                    valid = False
+                if not valid:
+                    return self._invalid_response()
                 tfa.enabled = True
-                tfa.save()
-                return Response({'ok': True, 'message': '2FA 启用成功'})
+                tfa.save(update_fields=['enabled', 'updated_at'])
+                from .jwt import revoke_all_auth_sessions
+                revoke_all_auth_sessions(request.user, reason='2fa_enabled')
 
-            return Response({'error': '验证码无效'}, status=status.HTTP_400_BAD_REQUEST)
-        else:
-            # 未认证用户 - 登录时 2FA 验证（通过 user_id 或 session）
-            user_id = request.data.get('user_id')
-            if not user_id:
-                return Response({'error': '需要用户标识'}, status=status.HTTP_400_BAD_REQUEST)
+            response = Response({'ok': True, 'message': '2FA 启用成功'})
+            _clear_sso_cookies(request, response)
+            return response
+
+        # A caller must never be able to select the account by user_id.
+        if 'user_id' in request.data:
+            return self._invalid_response()
+        if not isinstance(bearer, str) or not bearer:
+            return self._invalid_response()
+
+        challenge_hash = LoginChallenge.hash_bearer(bearer)
+        access = refresh = None
+        used_backup = False
+        with transaction.atomic():
+            challenge = (
+                LoginChallenge.objects.select_for_update()
+                .select_related('user')
+                .filter(challenge_hash=challenge_hash)
+                .first()
+            )
+            now = timezone.now()
+            if (
+                challenge is None
+                or challenge.used_at is not None
+                or challenge.expires_at <= now
+                or challenge.attempts >= 5
+            ):
+                return self._invalid_response()
+
+            user = challenge.user
+            tfa = (
+                TwoFactorAuth.objects.select_for_update()
+                .filter(user=user, enabled=True)
+                .first()
+            )
+            if not user.is_active or tfa is None or not tfa.secret:
+                challenge.attempts += 1
+                challenge.save(update_fields=['attempts'])
+                return self._invalid_response()
 
             try:
-                from django.contrib.auth import get_user_model
-                User = get_user_model()
-                user = User.objects.get(id=user_id)
-            except User.DoesNotExist:
-                return Response({'error': '用户不存在'}, status=status.HTTP_404_NOT_FOUND)
+                valid_totp = totp_service.verify_totp(tfa.get_totp_secret(), code)
+            except Exception:
+                valid_totp = False
+            valid_backup = False
+            backup_index = None
+            if not valid_totp:
+                valid_backup, backup_index = totp_service.verify_backup_code(
+                    tfa.backup_codes, code
+                )
+            if not valid_totp and not valid_backup:
+                challenge.attempts += 1
+                challenge.save(update_fields=['attempts'])
+                return self._invalid_response()
 
-            tfa = TwoFactorAuth.objects.filter(user=user, enabled=True).first()
-            if not tfa:
-                return Response({'error': '该用户未启用 2FA'}, status=status.HTTP_400_BAD_REQUEST)
+            if valid_backup:
+                tfa.backup_codes = totp_service.remove_used_backup_code(
+                    tfa.backup_codes, backup_index
+                )
+                tfa.save(update_fields=['backup_codes', 'updated_at'])
+                used_backup = True
+            challenge.used_at = now
+            challenge.save(update_fields=['used_at'])
 
-            # 验证 TOTP 代码
-            if totp_service.verify_totp(tfa.secret, code):
-                return Response({'ok': True, 'verified': True})
+            from .jwt import issue_token_pair
+            access, refresh = issue_token_pair(user)
 
-            # 验证备份码
-            is_backup, index = totp_service.verify_backup_code(tfa.backup_codes, code)
-            if is_backup:
-                # 使用备份码后将其移除
-                tfa.backup_codes = totp_service.remove_used_backup_code(tfa.backup_codes, index)
-                tfa.save()
-                return Response({'ok': True, 'verified': True, 'used_backup': True})
-
-            return Response({'error': '验证码无效'}, status=status.HTTP_400_BAD_REQUEST)
+        response_data = {
+            'ok': True,
+            'verified': True,
+            'access': access,
+            'refresh': refresh,
+        }
+        if used_backup:
+            response_data['used_backup'] = True
+        response = Response(response_data)
+        _set_sso_cookies(request, response, access, refresh)
+        return response
 
 
 class TwoFactorAuthDisableView(generics.GenericAPIView):
@@ -674,7 +840,11 @@ class TwoFactorAuthDisableView(generics.GenericAPIView):
         tfa.backup_codes = []
         tfa.save()
 
-        return Response({'ok': True, 'message': '2FA 已禁用'})
+        from .jwt import revoke_all_auth_sessions
+        revoke_all_auth_sessions(user, reason='2fa_disabled')
+        response = Response({'ok': True, 'message': '2FA 已禁用'})
+        _clear_sso_cookies(request, response)
+        return response
 
 
 class TwoFactorAuthStatusView(generics.GenericAPIView):

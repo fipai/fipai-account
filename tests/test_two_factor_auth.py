@@ -189,46 +189,50 @@ class TwoFactorAuthAPITests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_2fa_login_verification(self):
-        """测试登录时 2FA 验证"""
-        # 设置并启用 2FA
+        """测试登录时 2FA challenge 验证并签发 token"""
         setup_response = self.client.post('/api/auth/2fa/setup/')
         secret = setup_response.json()['secret']
         totp = pyotp.TOTP(secret)
         self.client.post('/api/auth/2fa/verify/', {'code': totp.now()})
 
-        # 未认证用户尝试验证
         self.client.force_authenticate(user=None)
+        login_response = self.client.post('/api/auth/login/', {
+            'username': self.user.username,
+            'password': 'testpass123',
+        })
+        self.assertEqual(login_response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertNotIn('access', login_response.json())
 
-        # 使用 TOTP 代码验证
         response = self.client.post('/api/auth/2fa/verify/', {
-            'user_id': self.user.id,
-            'code': totp.now()
+            'challenge': login_response.json()['challenge'],
+            'code': totp.now(),
         })
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.json()['verified'])
+        self.assertIn('access', response.json())
+        self.assertIn('refresh', response.json())
 
     def test_2fa_backup_code_verification(self):
-        """测试备份码验证"""
-        # 设置 2FA（不启用）
+        """测试challenge备用码验证并消费备用码"""
         setup_response = self.client.post('/api/auth/2fa/setup/')
         backup_codes = setup_response.json()['backup_codes']
-
-        # 先启用 2FA
         secret = setup_response.json()['secret']
         totp = pyotp.TOTP(secret)
         self.client.post('/api/auth/2fa/verify/', {'code': totp.now()})
 
-        # 未认证用户使用备份码验证
         self.client.force_authenticate(user=None)
+        login_response = self.client.post('/api/auth/login/', {
+            'username': self.user.username,
+            'password': 'testpass123',
+        })
         response = self.client.post('/api/auth/2fa/verify/', {
-            'user_id': self.user.id,
-            'code': backup_codes[0]
+            'challenge': login_response.json()['challenge'],
+            'code': backup_codes[0],
         })
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.json()['verified'])
         self.assertTrue(response.json()['used_backup'])
 
-        # 重新认证为原始用户，验证备份码已使用（剩余数量减少）
         self.client.force_authenticate(user=self.user)
         status_response = self.client.get('/api/auth/2fa/status/')
         self.assertEqual(status_response.json()['backup_codes_remaining'], 9)

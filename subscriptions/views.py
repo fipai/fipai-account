@@ -2,6 +2,7 @@
 Subscriptions API Views
 """
 from django.utils import timezone
+from django.db import transaction
 from django.db.models import Q
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -128,8 +129,10 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
         ).select_related('tenant').first()
 
         if existing_membership:
-            # 用户已有租户，直接激活订阅
-            subscription.activate()
+            # 用户已有租户：绑定订阅后再激活，确保租户级 JWT scopes 可见。
+            with transaction.atomic():
+                subscription.tenant = existing_membership.tenant
+                subscription.activate()
             return Response({
                 'tenant_id': existing_membership.tenant_id,
                 'tenant_name': existing_membership.tenant.name,

@@ -5,6 +5,8 @@ import uuid
 import logging
 from decimal import Decimal
 from django.conf import settings
+from django.db import transaction
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -12,7 +14,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 
-from .models import PaymentTransaction, RefundRequest
+from .models import PaymentConflictError, PaymentTransaction, RefundRequest
 from .gateways import get_gateway, get_available_gateways
 from .serializers import PaymentTransactionSerializer, RefundRequestSerializer, RefundRequestCreateSerializer
 from subscriptions.models import Subscription
@@ -108,45 +110,118 @@ class PaymentViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def query(self, request):
-        """查询订单状态"""
-        out_trade_no = request.query_params.get('out_trade_no')
+        """锁定本地订单，并仅以本地订单号查询和核验网关状态。"""
+        requested_out_trade_no = request.query_params.get('out_trade_no')
         payment_id = request.query_params.get('payment_id')
 
-        if not out_trade_no and not payment_id:
-            return Response({'error': 'out_trade_no or payment_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not requested_out_trade_no and not payment_id:
+            return Response(
+                {'error': 'out_trade_no or payment_id is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
-            if payment_id:
-                payment = PaymentTransaction.objects.get(id=payment_id, user=request.user)
-            else:
-                payment = PaymentTransaction.objects.get(out_trade_no=out_trade_no, user=request.user)
+            with transaction.atomic():
+                locked_payments = PaymentTransaction.objects.select_for_update().filter(
+                    user=request.user
+                )
+                if payment_id:
+                    payment = locked_payments.get(id=payment_id)
+                else:
+                    payment = locked_payments.get(
+                        out_trade_no=requested_out_trade_no
+                    )
 
-            if payment.status != 'pending':
+                if (
+                    payment_id
+                    and requested_out_trade_no
+                    and requested_out_trade_no != payment.out_trade_no
+                ):
+                    return Response(
+                        {'error': 'payment identifiers do not match'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if payment.status != 'pending':
+                    return Response({
+                        'code': 0,
+                        'data': {
+                            'status': payment.status,
+                            'paid_at': payment.paid_at,
+                        },
+                    })
+
+                gateway = get_gateway(payment.gateway)
+                result = gateway.query_order(payment.out_trade_no)
+                if not isinstance(result, dict) or result.get('code') != 0:
+                    logger.warning(
+                        'payment_query_rejected',
+                        extra={
+                            'gateway': payment.gateway,
+                            'error_code': 'gateway_query_failed',
+                        },
+                    )
+                    return Response(
+                        {'error': '支付状态验证失败'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                query_data = result.get('data')
+                if not isinstance(query_data, dict):
+                    return Response(
+                        {'error': '支付状态验证失败'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if query_data.get('status') == 'paid':
+                    queried_trade_no = query_data.get('trade_no')
+                    try:
+                        queried_amount = Decimal(query_data.get('amount'))
+                    except (TypeError, ValueError, ArithmeticError):
+                        queried_amount = None
+
+                    paid_response_valid = all([
+                        query_data.get('out_trade_no') == payment.out_trade_no,
+                        queried_amount == payment.amount,
+                        query_data.get('currency') == 'CNY',
+                        isinstance(queried_trade_no, str),
+                        bool(queried_trade_no.strip()) if isinstance(queried_trade_no, str) else False,
+                    ])
+                    if not paid_response_valid:
+                        return Response(
+                            {'error': '支付状态验证失败'},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+
+                    payment.mark_paid(queried_trade_no.strip())
+
                 return Response({
                     'code': 0,
                     'data': {
                         'status': payment.status,
                         'paid_at': payment.paid_at,
-                    }
+                    },
                 })
 
-            # 查询支付网关
-            gateway = get_gateway(payment.gateway)
-            result = gateway.query_order(out_trade_no)
-
-            if result['code'] == 0 and result['data'].get('status') == 'paid':
-                payment.mark_paid(result['data'].get('trade_no', ''))
-
-            return Response({
-                'code': 0,
-                'data': {
-                    'status': payment.status,
-                    'paid_at': payment.paid_at,
-                }
-            })
-
         except PaymentTransaction.DoesNotExist:
-            return Response({'error': '订单不存在'}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {'error': '订单不存在'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except PaymentConflictError:
+            return Response(
+                {'error': '支付状态验证失败'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception:
+            logger.warning(
+                'payment_query_rejected',
+                extra={'gateway': 'unknown', 'error_code': 'processing_exception'},
+            )
+            return Response(
+                {'error': '支付状态验证失败'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
     @action(detail=False, methods=['get'])
     def available_gateways(self, request):
@@ -208,39 +283,129 @@ class RefundRequestViewSet(viewsets.ModelViewSet):
 
 
 class PaymentCallbackView(APIView):
-    """支付回调"""
+    """支付网关服务端回调。"""
     permission_classes = [AllowAny]
 
+    @staticmethod
+    def _response(gateway_name, success):
+        """返回网关可识别且不泄露内部错误的稳定响应。"""
+        if gateway_name == 'alipay':
+            return HttpResponse(
+                'success' if success else 'failure',
+                status=200 if success else 400,
+                content_type='text/plain',
+            )
+        if gateway_name == 'wechat':
+            return Response(
+                {
+                    'code': 'SUCCESS' if success else 'FAIL',
+                    'message': '成功' if success else '回调处理失败',
+                },
+                status=status.HTTP_200_OK if success else status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(
+            {'code': 'FAIL', 'message': '回调处理失败'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    @staticmethod
+    def _reject(gateway_name, error_code):
+        """回调边界只记录固定事件、网关和内部错误码。"""
+        logger.warning(
+            'payment_callback_rejected',
+            extra={'gateway': gateway_name, 'error_code': error_code},
+        )
+
+    @staticmethod
+    def _trade_no(data):
+        return data.get('trade_no') or data.get('transaction_id') or ''
+
+    @staticmethod
+    def _safe_callback_data(gateway_name, data, trade_status, amount):
+        """仅持久化状态核对所需字段，不保存完整回调或签名。"""
+        return {
+            'gateway': gateway_name,
+            'trade_no': PaymentCallbackView._trade_no(data),
+            'trade_status': trade_status,
+            'amount': str(amount),
+        }
+
     def post(self, request, gateway_name):
-        """处理支付回调"""
+        """一次验签/解密后，在行锁事务内执行订单状态转换。"""
         try:
+            # 微信 SDK 必须接收未经 DRF 重编码的原始请求体。
+            raw_body = request.body
             gateway = get_gateway(gateway_name)
+            trusted_data = gateway.parse_callback(
+                data=request.data,
+                headers=request.headers,
+                raw_body=raw_body,
+            )
+            if trusted_data is None:
+                self._reject(gateway_name, 'untrusted_callback')
+                return self._response(gateway_name, False)
 
-            # 验证签名
-            if not gateway.verify_callback(request.data):
-                logger.warning(f"Payment callback verify failed: {request.data}")
-                return Response({'code': 1, 'message': 'verify failed'})
+            out_trade_no, trade_status, amount = gateway.get_trade_status(trusted_data)
+            if not out_trade_no:
+                self._reject(gateway_name, 'missing_order_number')
+                return self._response(gateway_name, False)
 
-            # 获取交易状态
-            out_trade_no, trade_status, amount = gateway.get_trade_status(request.data)
+            amount = Decimal(amount)
+            with transaction.atomic():
+                payment = (
+                    PaymentTransaction.objects.select_for_update()
+                    .get(out_trade_no=out_trade_no)
+                )
+                if payment.gateway != gateway_name:
+                    self._reject(gateway_name, 'gateway_mismatch')
+                    return self._response(gateway_name, False)
+                if amount != payment.amount:
+                    self._reject(gateway_name, 'amount_mismatch')
+                    return self._response(gateway_name, False)
 
-            # 更新订单
-            try:
-                payment = PaymentTransaction.objects.get(out_trade_no=out_trade_no)
+                if trade_status == 'paid':
+                    incoming_trade_no = self._trade_no(trusted_data)
+                    if not isinstance(incoming_trade_no, str) or not incoming_trade_no.strip():
+                        self._reject(gateway_name, 'missing_transaction_number')
+                        return self._response(gateway_name, False)
+                    incoming_trade_no = incoming_trade_no.strip()
 
-                if trade_status == 'paid' and payment.status == 'pending':
-                    payment.mark_paid(
-                        trade_no=request.data.get('trade_no', ''),
-                        callback_data=request.data
+                    if (
+                        payment.status == 'paid'
+                        and payment.trade_no
+                        and payment.trade_no != incoming_trade_no
+                    ):
+                        self._reject(gateway_name, 'transaction_mismatch')
+                        return self._response(gateway_name, False)
+
+                    trade_number_in_use = (
+                        PaymentTransaction.objects.select_for_update()
+                        .filter(
+                            gateway=gateway_name,
+                            trade_no=incoming_trade_no,
+                        )
+                        .exclude(pk=payment.pk)
+                        .exists()
                     )
-                    logger.info(f"Payment completed: {out_trade_no}")
+                    if trade_number_in_use:
+                        self._reject(gateway_name, 'transaction_already_bound')
+                        return self._response(gateway_name, False)
 
-                return Response({'code': 0, 'message': 'success'})
+                    payment.mark_paid(
+                        trade_no=incoming_trade_no,
+                        callback_data=self._safe_callback_data(
+                            gateway_name, trusted_data, trade_status, amount
+                        ),
+                    )
 
-            except PaymentTransaction.DoesNotExist:
-                logger.error(f"Payment not found: {out_trade_no}")
-                return Response({'code': 1, 'message': 'order not found'})
+            return self._response(gateway_name, True)
 
-        except Exception as e:
-            logger.error(f"Payment callback error: {e}")
-            return Response({'code': 1, 'message': str(e)})
+        except PaymentTransaction.DoesNotExist:
+            self._reject(gateway_name, 'order_not_found')
+            return self._response(gateway_name, False)
+        except PaymentConflictError:
+            self._reject(gateway_name, 'transaction_already_bound')
+            return self._response(gateway_name, False)
+        except Exception:
+            self._reject(gateway_name, 'processing_exception')
+            return self._response(gateway_name, False)

@@ -17,7 +17,9 @@ class TeamMemberSerializer(serializers.ModelSerializer):
             'role', 'role_display', 'status', 'product_permissions',
             'joined_at'
         ]
-        read_only_fields = ['tenant', 'user', 'joined_at']
+        read_only_fields = [
+            'tenant', 'user', 'role', 'status', 'product_permissions', 'joined_at'
+        ]
 
 
 class TeamMemberCreateSerializer(serializers.Serializer):

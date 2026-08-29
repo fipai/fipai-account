@@ -12,7 +12,9 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import AccessToken
 
+from accounts.jwt import issue_token_pair
 from subscriptions.models import Subscription, SubscriptionPlan
 from teams.models import TeamMember
 from tenants.models import Tenant
@@ -321,3 +323,53 @@ class SubscriptionStateMachineTest(TestCase):
         }, format="json")
 
         self.assertEqual(resp.status_code, 400)
+
+    def test_existing_tenant_activation_binds_subscription_and_updates_switch_claims(self):
+        user = self.user_model.objects.create_user(
+            username="13800020112",
+            password="Passw0rd123",
+        )
+        tenant = Tenant.objects.create(
+            name="Existing Tenant",
+            slug="existing-tenant",
+            owner=user,
+            status="active",
+        )
+        TeamMember.objects.create(
+            tenant=tenant,
+            user=user,
+            role="owner",
+            status="active",
+            product_permissions={},
+        )
+        plan = self._create_plan(product="businessbuilder")
+        subscription = self._create_paid_subscription(user, plan)
+
+        self.client.force_authenticate(user=user)
+        activate_response = self.client.post(
+            f"/api/subscriptions/{subscription.id}/activate/",
+            {
+                "company_email": "owner@existing.example.com",
+                "tenant_name": "Ignored New Tenant Name",
+            },
+            format="json",
+        )
+
+        self.assertEqual(activate_response.status_code, 200)
+        self.assertEqual(activate_response.data["tenant_id"], tenant.id)
+        subscription.refresh_from_db()
+        self.assertEqual(subscription.tenant_id, tenant.id)
+        self.assertEqual(subscription.status, "active")
+
+        access, _ = issue_token_pair(user)
+        self.client.force_authenticate(user=None)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+        switch_response = self.client.post(
+            "/api/auth/tenant/switch/",
+            {"tenant_id": tenant.id},
+            format="json",
+        )
+        self.assertEqual(switch_response.status_code, 200)
+        claims = AccessToken(switch_response.data["access"])
+        self.assertEqual(claims["tenant_id"], tenant.id)
+        self.assertIn("businessbuilder", claims["product_scopes"])

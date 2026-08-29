@@ -1,8 +1,12 @@
 """
 Payments App - 支付系统
 """
-from django.db import models
+from django.db import models, transaction
 from django.conf import settings
+
+
+class PaymentConflictError(ValueError):
+    """支付渠道交易号为空或已绑定其他本地订单。"""
 
 
 class PaymentTransaction(models.Model):
@@ -64,27 +68,78 @@ class PaymentTransaction(models.Model):
     class Meta:
         db_table = 'payments_transaction'
         ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['gateway', 'trade_no'],
+                condition=~models.Q(trade_no=''),
+                name='uniq_payment_gateway_trade_no_nonempty',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.out_trade_no} - {self.amount} ({self.status})"
 
+    @transaction.atomic
     def mark_paid(self, trade_no: str, callback_data: dict = None):
-        """标记为已支付（幂等性：只有 pending 状态才能更新为 paid）"""
+        """锁内校验渠道交易号并仅执行一次 pending -> paid。"""
         from django.utils import timezone
+        from subscriptions.models import Subscription
 
-        # 幂等性：只有 pending 状态才能更新为 paid
-        if self.status != 'pending':
-            return
+        locked = (
+            PaymentTransaction.objects.select_for_update()
+            .get(pk=self.pk)
+        )
+        normalized_trade_no = str(trade_no).strip() if trade_no is not None else ''
+        if not normalized_trade_no:
+            raise PaymentConflictError('A non-empty gateway trade number is required.')
 
-        self.status = 'paid'
-        self.trade_no = trade_no
-        self.paid_at = timezone.now()
-        if callback_data:
-            self.callback_data = callback_data
-        self.save()
+        conflicting_payment = (
+            PaymentTransaction.objects.select_for_update()
+            .filter(gateway=locked.gateway, trade_no=normalized_trade_no)
+            .exclude(pk=locked.pk)
+            .exists()
+        )
+        if conflicting_payment:
+            raise PaymentConflictError(
+                'The gateway trade number is already bound to another payment.'
+            )
 
-        # 激活订阅
-        self.subscription.activate()
+        if locked.status != 'pending':
+            self.status = locked.status
+            self.trade_no = locked.trade_no
+            self.paid_at = locked.paid_at
+            self.callback_data = locked.callback_data
+            self.callback_time = locked.callback_time
+            return False
+
+        subscription = Subscription.objects.select_for_update().get(
+            pk=locked.subscription_id
+        )
+        now = timezone.now()
+        locked.status = 'paid'
+        locked.trade_no = normalized_trade_no
+        locked.paid_at = now
+        locked.callback_time = now
+        if callback_data is not None:
+            locked.callback_data = callback_data
+        locked.save(update_fields=[
+            'status',
+            'trade_no',
+            'paid_at',
+            'callback_time',
+            'callback_data',
+            'updated_at',
+        ])
+
+        if subscription.status == 'pending':
+            subscription.activate()
+
+        self.status = locked.status
+        self.trade_no = locked.trade_no
+        self.paid_at = locked.paid_at
+        self.callback_data = locked.callback_data
+        self.callback_time = locked.callback_time
+        return True
 
     def mark_refunded(self):
         """标记为已退款"""

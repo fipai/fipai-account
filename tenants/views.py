@@ -8,7 +8,9 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 
+from .eligibility import eligible_tenant_filters
 from .models import Tenant
+from .permissions import TenantObjectPermission
 from .serializers import TenantSerializer, TenantCreateSerializer
 from teams.models import TeamMember, Invitation
 from teams.serializers import InvitationSerializer
@@ -22,34 +24,47 @@ class TenantViewSet(viewsets.ModelViewSet):
     POST /api/tenants/ - 创建租户
     GET /api/tenants/{id}/ - 获取租户详情
     PUT /api/tenants/{id}/ - 更新租户
-    DELETE /api/tenants/{id}/ - 删除租户
+    DELETE /api/tenants/{id}/ - 软停用租户
     GET /api/tenants/{id}/members/ - 获取成员
     """
     serializer_class = TenantSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, TenantObjectPermission]
 
     def get_queryset(self):
-        # 返回用户所属的租户
-        memberships = TeamMember.objects.filter(user=self.request.user, status='active')
-        tenant_ids = memberships.values_list('tenant_id', flat=True)
-        return Tenant.objects.filter(id__in=tenant_ids)
+        # 平台管理员仅在管理操作中可定位任意租户；读取仍按活跃成员隔离。
+        if (
+            self.action in {'update', 'partial_update', 'destroy'}
+            and (self.request.user.is_staff or self.request.user.is_superuser)
+        ):
+            return Tenant.objects.all().select_related('owner')
 
-    def get_permissions(self):
-        if self.action == 'list' or self.action == 'retrieve':
-            return [IsAuthenticated()]
-        return [IsAuthenticated()]
+        tenant_ids = TeamMember.objects.filter(
+            user=self.request.user,
+            status='active',
+            **eligible_tenant_filters(),
+        ).values_list('tenant_id', flat=True)
+        return Tenant.objects.filter(
+            id__in=tenant_ids,
+            **eligible_tenant_filters(prefix=""),
+        ).select_related('owner')
 
     def create(self, request, *args, **kwargs):
         serializer = TenantCreateSerializer(data=request.data, context=self.get_serializer_context())
         serializer.is_valid(raise_exception=True)
         tenant = serializer.save()
-        return Response(TenantSerializer(tenant).data, status=status.HTTP_201_CREATED)
+        return Response(
+            TenantSerializer(tenant, context=self.get_serializer_context()).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=True, methods=['get'])
     def members(self, request, pk=None):
         """获取租户成员列表"""
         tenant = self.get_object()
-        memberships = TeamMember.objects.filter(tenant=tenant, status='active')
+        memberships = TeamMember.objects.filter(
+            tenant=tenant,
+            status='active',
+        ).select_related('user')
         data = []
         for m in memberships:
             data.append({
@@ -58,9 +73,17 @@ class TenantViewSet(viewsets.ModelViewSet):
                 'name': m.user.first_name if m.user else '',
                 'role': m.role,
                 'product_permissions': m.product_permissions,
-                'joined_at': m.created_at,
+                'joined_at': m.joined_at,
             })
         return Response(data)
+
+    def destroy(self, request, *args, **kwargs):
+        """可恢复地停用租户，保留其成员和关联数据。"""
+        tenant = self.get_object()
+        tenant.status = 'cancelled'
+        tenant.is_active = False
+        tenant.save(update_fields=['status', 'is_active', 'updated_at'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['post'])
     def invite(self, request, pk=None):
@@ -84,6 +107,12 @@ class TenantViewSet(viewsets.ModelViewSet):
         email = request.data.get('email')
         phone = request.data.get('phone')
         role = request.data.get('role', 'member')
+
+        valid_roles = {choice[0] for choice in TeamMember.ROLE_CHOICES}
+        if role not in valid_roles:
+            return Response({'error': '无效角色'}, status=status.HTTP_400_BAD_REQUEST)
+        if role == 'owner' and membership.role != 'owner':
+            return Response({'error': '管理员不能授予所有者角色'}, status=status.HTTP_403_FORBIDDEN)
 
         if not email and not phone:
             return Response({'error': 'email 或 phone 至少填写一项'}, status=status.HTTP_400_BAD_REQUEST)
@@ -120,7 +149,10 @@ class TenantViewSet(viewsets.ModelViewSet):
     def public(self, request, pk=None):
         """获取公开租户信息"""
         try:
-            tenant = Tenant.objects.get(slug=pk, is_active=True)
+            tenant = Tenant.objects.get(
+                slug=pk,
+                **eligible_tenant_filters(prefix=""),
+            )
             return Response({
                 'name': tenant.name,
                 'logo': tenant.logo,

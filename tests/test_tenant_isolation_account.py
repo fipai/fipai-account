@@ -13,7 +13,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
-from rest_framework_simplejwt.tokens import RefreshToken
+from accounts.jwt import issue_token_pair
 
 from invoices.models import InvoiceRequest
 from payments.models import PaymentTransaction, RefundRequest
@@ -179,11 +179,8 @@ class TenantIsolationTestBase(TestCase):
         )
 
         # 生成 JWT tokens
-        refresh_a = RefreshToken.for_user(self.user_a)
-        self.access_token_a = str(refresh_a.access_token)
-
-        refresh_b = RefreshToken.for_user(self.user_b)
-        self.access_token_b = str(refresh_b.access_token)
+        self.access_token_a, _ = issue_token_pair(self.user_a)
+        self.access_token_b, _ = issue_token_pair(self.user_b)
 
     def _auth_headers_a(self):
         return {'HTTP_AUTHORIZATION': f'Bearer {self.access_token_a}'}

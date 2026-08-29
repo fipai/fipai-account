@@ -10,7 +10,7 @@ import json
 from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
-from rest_framework_simplejwt.tokens import RefreshToken
+from accounts.jwt import FIPRefreshToken as RefreshToken, issue_token_pair
 
 
 class TokenRefreshTest(TestCase):
@@ -28,12 +28,12 @@ class TokenRefreshTest(TestCase):
 
     def test_token_refresh_with_valid_token(self):
         """使用有效的 refresh token 刷新"""
-        # 获取 refresh token
-        refresh = RefreshToken.for_user(self.user)
+        # 获取已登记服务端 family 的 refresh token
+        _, refresh_token = issue_token_pair(self.user)
 
         response = self.client.post(
             '/api/auth/token/refresh/',
-            data=json.dumps({'refresh': str(refresh)}),
+            data=json.dumps({'refresh': refresh_token}),
             content_type='application/json'
         )
 
@@ -43,9 +43,7 @@ class TokenRefreshTest(TestCase):
 
     def test_token_refresh_cookie_fallback(self):
         """当请求体无 refresh token 时从 Cookie 读取"""
-        # 获取 refresh token
-        refresh = RefreshToken.for_user(self.user)
-        refresh_token_str = str(refresh)
+        _, refresh_token_str = issue_token_pair(self.user)
 
         # 模拟带 Cookie 的请求
         self.client.cookies['fip_refresh_token'] = refresh_token_str

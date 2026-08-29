@@ -3,6 +3,7 @@ Django settings for FIP.AI Account System (account.fipai.cn)
 账号系统：用户、租户、套餐、支付、团队
 """
 import os
+import re
 from pathlib import Path
 from datetime import timedelta
 from django.core.exceptions import ImproperlyConfigured
@@ -155,11 +156,134 @@ CORS_ALLOW_HEADERS = [
 ]
 
 # =============================================================================
+# JWT signing contract
+# =============================================================================
+JWT_ISSUER = 'https://account.fipai.cn'
+JWT_AUDIENCE = 'fip-api'
+JWT_ALGORITHM = os.environ.get('JWT_ALGORITHM', 'HS256' if DEBUG else '').strip().upper()
+JWT_KEY_ID = os.environ.get('JWT_KEY_ID', 'fip-account-dev' if DEBUG else '').strip()
+JWT_SIGNING_KEY = os.environ.get('JWT_SIGNING_KEY', '').replace('\\n', '\n').strip()
+JWT_VERIFYING_KEY = os.environ.get('JWT_VERIFYING_KEY', '').replace('\\n', '\n').strip()
+
+_insecure_jwt_values = {
+    '', 'default', 'changeme', 'change-me', 'your-key-id',
+    'your-signing-key', 'your-verifying-key',
+}
+if JWT_ALGORITHM not in {'HS256', 'RS256'}:
+    raise ImproperlyConfigured('JWT_ALGORITHM must be HS256 (DEBUG only) or RS256.')
+if not DEBUG and JWT_ALGORITHM != 'RS256':
+    raise ImproperlyConfigured('JWT_ALGORITHM must be RS256 when DEBUG=false.')
+if JWT_ALGORITHM == 'HS256':
+    if not DEBUG:
+        raise ImproperlyConfigured('HS256 is permitted only when DEBUG=true.')
+    JWT_SIGNING_KEY = JWT_SIGNING_KEY or SECRET_KEY
+    JWT_VERIFYING_KEY = JWT_VERIFYING_KEY or JWT_SIGNING_KEY
+    if len(JWT_SIGNING_KEY) < 32 or JWT_SIGNING_KEY.lower() in _insecure_jwt_values:
+        raise ImproperlyConfigured('JWT_SIGNING_KEY must be an explicit secure development secret.')
+    if JWT_VERIFYING_KEY != JWT_SIGNING_KEY:
+        raise ImproperlyConfigured('HS256 JWT_VERIFYING_KEY must equal JWT_SIGNING_KEY.')
+else:
+    import re
+    from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding, PublicFormat, load_pem_private_key, load_pem_public_key,
+    )
+
+    if not JWT_SIGNING_KEY or not JWT_VERIFYING_KEY:
+        raise ImproperlyConfigured('RS256 requires JWT_SIGNING_KEY and JWT_VERIFYING_KEY.')
+    try:
+        _jwt_private_key = load_pem_private_key(JWT_SIGNING_KEY.encode(), password=None)
+        _jwt_public_key = load_pem_public_key(JWT_VERIFYING_KEY.encode())
+    except (TypeError, ValueError) as exc:
+        raise ImproperlyConfigured('JWT signing/verifying keys must be valid PEM keys.') from exc
+    if not isinstance(_jwt_private_key, RSAPrivateKey) or not isinstance(_jwt_public_key, RSAPublicKey):
+        raise ImproperlyConfigured('JWT_SIGNING_KEY/JWT_VERIFYING_KEY must be RSA keys.')
+    _derived_public = _jwt_private_key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    _configured_public = _jwt_public_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    if _derived_public != _configured_public:
+        raise ImproperlyConfigured('JWT_SIGNING_KEY and JWT_VERIFYING_KEY do not form a key pair.')
+
+if not JWT_KEY_ID or not re.fullmatch(r'[A-Za-z0-9._-]{1,128}', JWT_KEY_ID):
+    raise ImproperlyConfigured('JWT_KEY_ID is missing or invalid.')
+if not DEBUG and JWT_KEY_ID.lower() in _insecure_jwt_values | {'fip-account-dev'}:
+    raise ImproperlyConfigured('JWT_KEY_ID must be an explicit non-default production key id.')
+
+# =============================================================================
+# TOTP seed encryption
+# =============================================================================
+# The active Fernet key must be injected by the deployment secret manager. The
+# optional JSON keyring keeps old keys available for decrypt-only rotation.
+# Stored values include the key id but never the key itself.
+import base64
+import hashlib
+import json
+from cryptography.fernet import Fernet
+
+TOTP_ENCRYPTION_KEY_ID = os.environ.get('TOTP_ENCRYPTION_KEY_ID', '').strip()
+TOTP_ENCRYPTION_KEY = os.environ.get('TOTP_ENCRYPTION_KEY', '').strip()
+_raw_totp_previous_keys = os.environ.get('TOTP_PREVIOUS_ENCRYPTION_KEYS', '').strip()
+
+if not TOTP_ENCRYPTION_KEY_ID or not TOTP_ENCRYPTION_KEY:
+    if DEBUG:
+        TOTP_ENCRYPTION_KEY_ID = 'dev-derived-v1'
+        TOTP_ENCRYPTION_KEY = base64.urlsafe_b64encode(
+            hashlib.sha256(f'fip-totp-dev:{SECRET_KEY}'.encode('utf-8')).digest()
+        ).decode('ascii')
+    else:
+        raise ImproperlyConfigured(
+            'TOTP_ENCRYPTION_KEY_ID and TOTP_ENCRYPTION_KEY must be injected in production.'
+        )
+
+if not re.fullmatch(r'[A-Za-z0-9._-]{1,128}', TOTP_ENCRYPTION_KEY_ID):
+    raise ImproperlyConfigured('TOTP_ENCRYPTION_KEY_ID is invalid.')
+
+try:
+    Fernet(TOTP_ENCRYPTION_KEY.encode('ascii'))
+except (TypeError, ValueError) as exc:
+    raise ImproperlyConfigured(
+        'TOTP_ENCRYPTION_KEY must be a valid Fernet key.'
+    ) from exc
+
+if _raw_totp_previous_keys:
+    try:
+        TOTP_PREVIOUS_ENCRYPTION_KEYS = json.loads(_raw_totp_previous_keys)
+    except json.JSONDecodeError as exc:
+        raise ImproperlyConfigured(
+            'TOTP_PREVIOUS_ENCRYPTION_KEYS must be a JSON object.'
+        ) from exc
+    if not isinstance(TOTP_PREVIOUS_ENCRYPTION_KEYS, dict):
+        raise ImproperlyConfigured(
+            'TOTP_PREVIOUS_ENCRYPTION_KEYS must be a JSON object.'
+        )
+else:
+    TOTP_PREVIOUS_ENCRYPTION_KEYS = {}
+
+TOTP_ENCRYPTION_KEYRING = dict(TOTP_PREVIOUS_ENCRYPTION_KEYS)
+if TOTP_ENCRYPTION_KEY_ID in TOTP_ENCRYPTION_KEYRING:
+    raise ImproperlyConfigured(
+        'The active TOTP key id must not be duplicated in previous keys.'
+    )
+TOTP_ENCRYPTION_KEYRING[TOTP_ENCRYPTION_KEY_ID] = TOTP_ENCRYPTION_KEY
+for _totp_key_id, _totp_key in TOTP_ENCRYPTION_KEYRING.items():
+    if not isinstance(_totp_key_id, str) or not re.fullmatch(
+        r'[A-Za-z0-9._-]{1,128}', _totp_key_id
+    ):
+        raise ImproperlyConfigured('TOTP encryption keyring contains an invalid key id.')
+    if not isinstance(_totp_key, str):
+        raise ImproperlyConfigured('TOTP encryption keyring values must be strings.')
+    try:
+        Fernet(_totp_key.encode('ascii'))
+    except (TypeError, ValueError) as exc:
+        raise ImproperlyConfigured(
+            f'TOTP encryption key {_totp_key_id!r} is invalid.'
+        ) from exc
+
+# =============================================================================
 # Django REST Framework
 # =============================================================================
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'accounts.authentication.SessionJWTAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -168,11 +292,18 @@ REST_FRAMEWORK = {
 }
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
-    'ROTATE_REFRESH_TOKENS': False,
+    'ROTATE_REFRESH_TOKENS': True,
     'AUTH_HEADER_TYPES': ('Bearer',),
+    'ALGORITHM': JWT_ALGORITHM,
+    'SIGNING_KEY': JWT_SIGNING_KEY,
+    'VERIFYING_KEY': JWT_VERIFYING_KEY,
+    'ISSUER': JWT_ISSUER,
+    'AUDIENCE': JWT_AUDIENCE,
+    'AUTH_TOKEN_CLASSES': ('accounts.jwt.FIPAccessToken',),
     'TOKEN_OBTAIN_SERIALIZER': 'accounts.jwt.CustomTokenObtainPairSerializer',
+    'TOKEN_REFRESH_SERIALIZER': 'accounts.jwt.FIPTokenRefreshSerializer',
 }
 
 # =============================================================================
@@ -205,16 +336,21 @@ def _get_bool(val, default=False):
 
 ALIPAY_CONFIG = {
     'app_id': os.environ.get('ALIPAY_APP_ID', ''),
+    'seller_id': os.environ.get('ALIPAY_SELLER_ID', ''),
     'private_key': os.environ.get('ALIPAY_PRIVATE_KEY', ''),
     'public_key': os.environ.get('ALIPAY_PUBLIC_KEY', ''),
-    'sandbox': _get_bool(os.environ.get('ALIPAY_SANDBOX', 'true')),
+    # Mock 仅在 DEBUG=true 且显式开启 sandbox 时可用。
+    'sandbox': _get_bool(os.environ.get('ALIPAY_SANDBOX', 'false')),
 }
 
 WECHAT_CONFIG = {
     'mchid': os.environ.get('WECHAT_MCHID', ''),
-    'apikey': os.environ.get('WECHAT_APIKEY', ''),
+    'serial_no': os.environ.get('WECHAT_SERIAL_NO', ''),
+    'private_key': os.environ.get('WECHAT_PRIVATE_KEY', ''),
+    'apiv3_key': os.environ.get('WECHAT_APIV3_KEY', ''),
     'appid': os.environ.get('WECHAT_APPID', ''),
-    'sandbox': _get_bool(os.environ.get('WECHAT_SANDBOX', 'true')),
+    # Mock 仅在 DEBUG=true 且显式开启 sandbox 时可用。
+    'sandbox': _get_bool(os.environ.get('WECHAT_SANDBOX', 'false')),
 }
 
 PAYMENT_CONFIG = {

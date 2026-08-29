@@ -116,3 +116,9 @@ class LoginPhoneSerializer(serializers.Serializer):
         if not re.match(r'^1[3-9]\d{9}$', value):
             raise serializers.ValidationError('手机号格式不正确')
         return value
+
+
+class TenantSwitchSerializer(serializers.Serializer):
+    """Validate a requested tenant context without querying tenant existence."""
+
+    tenant_id = serializers.IntegerField(min_value=1)

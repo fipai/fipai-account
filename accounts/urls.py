@@ -3,7 +3,7 @@ from .views import (
     RegisterView, LoginView, UserView, SubscriptionView, OrderListView,
     ProfileUpdateView, PasswordChangeView,
     SendCodeView, RegisterPhoneView, LoginPhoneView,
-    CookieTokenRefreshView, LogoutView,
+    CookieTokenRefreshView, LogoutView, TenantListView, TenantSwitchView,
     TwoFactorAuthSetupView, TwoFactorAuthVerifyView, TwoFactorAuthDisableView, TwoFactorAuthStatusView,
     AccountDeletionRequestView, AccountDeletionStatusView, AccountDeleteConfirmView,
 )
@@ -25,6 +25,8 @@ urlpatterns = [
     path('subscription/', SubscriptionView.as_view(), name='auth-subscription'),
     path('orders/', OrderListView.as_view(), name='auth-orders'),
     path('token/refresh/', CookieTokenRefreshView.as_view(), name='token_refresh'),
+    path('tenants/', TenantListView.as_view(), name='auth-tenants'),
+    path('tenant/switch/', TenantSwitchView.as_view(), name='auth-tenant-switch'),
     path('logout/', LogoutView.as_view(), name='auth-logout'),
 
     # 2FA

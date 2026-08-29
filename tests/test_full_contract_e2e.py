@@ -11,7 +11,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
-from rest_framework_simplejwt.tokens import RefreshToken
+from accounts.jwt import FIPRefreshToken as RefreshToken
 
 from accounts.models import SMSCode
 from subscriptions.models import Subscription, SubscriptionPlan
@@ -203,7 +203,7 @@ class PhoneLoginEndpointTest(ContractE2ETestBase):
         self.assertEqual(resp.status_code, 400)
 
     def test_phone_login_user_not_exists(self):
-        """用户不存在"""
+        """用户不存在时不得与错误验证码响应区分"""
         phone = "13800000203"
         self._create_sms_code(phone, "login", "123456")
 
@@ -212,7 +212,8 @@ class PhoneLoginEndpointTest(ContractE2ETestBase):
             "code": "123456"
         }, format="json")
 
-        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.data, {'error': '登录凭据无效'})
 
 
 class AuthMeEndpointTest(ContractE2ETestBase):

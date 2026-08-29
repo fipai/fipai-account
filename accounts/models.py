@@ -6,6 +6,7 @@ from django.conf import settings
 from django.utils import timezone
 import hashlib
 import json
+import uuid
 
 
 class TwoFactorAuth(models.Model):
@@ -24,7 +25,7 @@ class TwoFactorAuth(models.Model):
     )
     enabled = models.BooleanField('是否启用', default=False)
     method = models.CharField('认证方式', max_length=10, choices=METHOD_CHOICES, default='totp')
-    secret = models.CharField('TOTP密钥', max_length=64, blank=True)
+    secret = models.CharField('TOTP密钥（加密）', max_length=512, blank=True)
     backup_codes = models.JSONField('备用码哈希列表', default=list)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -34,6 +35,18 @@ class TwoFactorAuth(models.Model):
 
     def __str__(self):
         return f"2FA for {self.user.username} - {'enabled' if self.enabled else 'disabled'}"
+
+    def set_totp_secret(self, plaintext: str) -> None:
+        """Encrypt a TOTP seed before assigning it to the persisted field."""
+        from .totp_crypto import encrypt_totp_secret
+
+        self.secret = encrypt_totp_secret(plaintext)
+
+    def get_totp_secret(self) -> str:
+        """Return the decrypted TOTP seed or fail closed."""
+        from .totp_crypto import decrypt_totp_secret
+
+        return decrypt_totp_secret(self.secret)
 
     def get_backup_codes_plain(self) -> list:
         """获取明文备份码（仅在新设置时调用）"""
@@ -146,3 +159,71 @@ class EmailVerification(models.Model):
             token_type=token_type,
             expires_at=timezone.now() + timezone.timedelta(hours=24),
         )
+
+
+class AuthSession(models.Model):
+    """Server-side refresh-token family state."""
+
+    sid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='auth_sessions',
+    )
+    current_refresh_jti = models.CharField(max_length=255)
+    expires_at = models.DateTimeField(db_index=True)
+    revoked_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    revoked_reason = models.CharField(max_length=64, blank=True)
+    reuse_detected_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'accounts_auth_session'
+        indexes = [
+            models.Index(fields=['user', 'revoked_at'], name='acct_session_user_rev_idx'),
+        ]
+
+
+class LoginChallenge(models.Model):
+    """One-time second-factor challenge; the bearer is never persisted."""
+
+    challenge_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='login_challenges',
+    )
+    expires_at = models.DateTimeField(db_index=True)
+    used_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'accounts_login_challenge'
+        indexes = [
+            models.Index(fields=['user', 'used_at'], name='acct_challenge_user_idx'),
+        ]
+
+    @staticmethod
+    def hash_bearer(bearer: str) -> str:
+        return hashlib.sha256(bearer.encode('utf-8')).hexdigest()
+
+    @classmethod
+    def create_for_user(cls, user, lifetime=None):
+        """Create a >=256-bit bearer and invalidate the user's older challenges."""
+        import secrets
+        from django.db import transaction
+
+        lifetime = lifetime or timezone.timedelta(minutes=5)
+        with transaction.atomic():
+            type(user).objects.select_for_update().get(pk=user.pk)
+            now = timezone.now()
+            cls.objects.filter(user=user, used_at__isnull=True).update(used_at=now)
+            bearer = secrets.token_urlsafe(32)
+            challenge = cls.objects.create(
+                user=user,
+                challenge_hash=cls.hash_bearer(bearer),
+                expires_at=now + lifetime,
+            )
+        return challenge, bearer

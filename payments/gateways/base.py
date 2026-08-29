@@ -4,9 +4,6 @@ Payment Gateway Base Class
 from abc import ABC, abstractmethod
 from decimal import Decimal
 from typing import Optional
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 class PaymentGateway(ABC):
@@ -25,45 +22,35 @@ class PaymentGateway(ABC):
         notify_url: str,
         return_url: Optional[str] = None
     ) -> dict:
-        """
-        创建支付订单
-        返回: {
-            'code': 0,  # 0=成功
-            'message': 'success',
-            'data': {
-                'trade_no': 'xxx',  # 渠道订单号
-                'pay_url': 'https://xxx',  # 支付链接
-                'qr_code': 'xxx',  # 二维码
-            }
-        }
-        """
-        pass
+        """创建支付订单。"""
+        raise NotImplementedError
 
     @abstractmethod
     def query_order(self, out_trade_no: str) -> dict:
-        """
-        查询订单状态
-        """
-        pass
+        """查询订单状态。"""
+        raise NotImplementedError
 
     @abstractmethod
     def refund(self, out_trade_no: str, amount: Decimal, reason: str = None) -> dict:
-        """
-        退款
-        """
-        pass
+        """发起退款。"""
+        raise NotImplementedError
 
     @abstractmethod
-    def verify_callback(self, data: dict) -> bool:
-        """
-        验证回调签名
-        """
-        pass
+    def parse_callback(
+        self,
+        data: dict,
+        headers=None,
+        raw_body: bytes = b'',
+    ) -> Optional[dict]:
+        """一次完成回调验签/解密，返回可信业务字典，失败返回 None。"""
+        raise NotImplementedError
+
+    def verify_callback(self, data: dict, headers=None, raw_body: bytes = b'') -> bool:
+        """兼容旧调用方；验签仅由 parse_callback 执行一次。"""
+        return self.parse_callback(data, headers, raw_body) is not None
 
     def handle_callback(self, data: dict) -> tuple:
-        """
-        处理回调，返回 (out_trade_no, status, amount)
-        """
+        """处理回调，返回 (out_trade_no, status, amount)。"""
         raise NotImplementedError
 
 

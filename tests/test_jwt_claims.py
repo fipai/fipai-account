@@ -11,7 +11,6 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
-from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.models import SMSCode
 from subscriptions.models import Subscription, SubscriptionPlan
@@ -212,7 +211,7 @@ class JWTClaimsTest(TestCase):
         self.assertIn("member", claims["roles"])
 
     def test_token_expiry_time_reasonable(self):
-        """Token 过期时间合理（exp - iat 应该约为 1 hour）"""
+        """Token 过期时间合理（exp - iat 应该约为 15 minutes）"""
         phone = "13800010106"
         self._create_sms_code(phone, "register", "123456")
 
@@ -229,10 +228,10 @@ class JWTClaimsTest(TestCase):
         self.assertIn("exp", claims)
         self.assertIn("iat", claims)
 
-        # exp - iat should be approximately 1 hour (3600 seconds)
+        # exp - iat should be approximately 15 minutes (900 seconds)
         exp_iat_diff = claims["exp"] - claims["iat"]
-        self.assertGreaterEqual(exp_iat_diff, 3500)
-        self.assertLessEqual(exp_iat_diff, 3700)
+        self.assertGreaterEqual(exp_iat_diff, 890)
+        self.assertLessEqual(exp_iat_diff, 910)
 
     def test_token_without_subscription_has_empty_claims(self):
         """未订阅用户 Token 的 tenant_id 和 product_scopes 为空"""

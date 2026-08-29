@@ -58,11 +58,30 @@ class SettingsSecurityTest(TestCase):
         self.assertIn("ALLOWED_HOSTS localhost,127.0.0.1,[::1]", result.stdout)
 
     def test_production_parses_allowed_hosts_from_env(self):
+        from cryptography.fernet import Fernet
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding, NoEncryption, PrivateFormat, PublicFormat,
+        )
+
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        private_pem = private_key.private_bytes(
+            Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()
+        ).decode()
+        public_pem = private_key.public_key().public_bytes(
+            Encoding.PEM, PublicFormat.SubjectPublicKeyInfo
+        ).decode()
         result = self._import_settings(
             {
                 "DJANGO_DEBUG": "false",
                 "DJANGO_SECRET_KEY": "prod-secret",
                 "DJANGO_ALLOWED_HOSTS": "account.fipai.cn,home.fipai.cn",
+                "JWT_ALGORITHM": "RS256",
+                "JWT_SIGNING_KEY": private_pem,
+                "JWT_VERIFYING_KEY": public_pem,
+                "JWT_KEY_ID": "account-prod-test",
+                "TOTP_ENCRYPTION_KEY_ID": "account-totp-test",
+                "TOTP_ENCRYPTION_KEY": Fernet.generate_key().decode(),
             }
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
