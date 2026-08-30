@@ -4,8 +4,11 @@ URL configuration for FIP.AI Account System (account.fipai.cn)
 from django.contrib import admin
 from django.urls import path, include
 from accounts.discovery import jwks, openid_configuration
+from fipai.health import liveness, readiness
 
 urlpatterns = [
+    path('health/live', liveness, name='health-live'),
+    path('health/ready', readiness, name='health-ready'),
     path('.well-known/jwks.json', jwks, name='jwks'),
     path('.well-known/openid-configuration', openid_configuration, name='openid-configuration'),
     path('admin/', admin.site.urls),

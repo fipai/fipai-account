@@ -28,6 +28,48 @@ elif DEBUG:
 else:
     raise ImproperlyConfigured("DJANGO_ALLOWED_HOSTS 环境变量未设置，生产环境必须配置允许的主机列表。")
 
+
+def _env_bool(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized not in {'true', '1', 'yes', 'false', '0', 'no'}:
+        raise ImproperlyConfigured(f'{name} must be a boolean value.')
+    return normalized in {'true', '1', 'yes'}
+
+
+# Gunicorn is bound to loopback and reached only through the trusted Nginx proxy.
+if _env_bool('DJANGO_TRUST_X_FORWARDED_PROTO', not DEBUG):
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+SECURE_SSL_REDIRECT = _env_bool('DJANGO_SECURE_SSL_REDIRECT', not DEBUG)
+SESSION_COOKIE_SECURE = _env_bool('DJANGO_SESSION_COOKIE_SECURE', not DEBUG)
+CSRF_COOKIE_SECURE = _env_bool('DJANGO_CSRF_COOKIE_SECURE', not DEBUG)
+
+try:
+    SECURE_HSTS_SECONDS = int(
+        os.environ.get('DJANGO_SECURE_HSTS_SECONDS', '3600' if not DEBUG else '0')
+    )
+except ValueError as exc:
+    raise ImproperlyConfigured('DJANGO_SECURE_HSTS_SECONDS must be an integer.') from exc
+if SECURE_HSTS_SECONDS < 0:
+    raise ImproperlyConfigured('DJANGO_SECURE_HSTS_SECONDS must not be negative.')
+SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool('DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS', False)
+SECURE_HSTS_PRELOAD = _env_bool('DJANGO_SECURE_HSTS_PRELOAD', False)
+
+_csrf_trusted_origins = [
+    origin.strip()
+    for origin in os.environ.get('DJANGO_CSRF_TRUSTED_ORIGINS', '').split(',')
+    if origin.strip()
+]
+if _csrf_trusted_origins:
+    CSRF_TRUSTED_ORIGINS = _csrf_trusted_origins
+elif not DEBUG:
+    CSRF_TRUSTED_ORIGINS = [
+        f'https://{host}' for host in ALLOWED_HOSTS
+        if host not in {'localhost', '127.0.0.1', '[::1]'} and '*' not in host
+    ]
+
 # =============================================================================
 # 中间件
 # =============================================================================
