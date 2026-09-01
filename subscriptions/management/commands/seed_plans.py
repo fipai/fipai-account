@@ -64,6 +64,26 @@ class Command(BaseCommand):
                 'max_users': 50,
                 'features': ['决策流程', '高级规则引擎', 'AI 推荐', '实时监控', '无限决策'],
             },
+            # BusinessBuilder — Portal (04UnifiedPortal) advertises this card; without
+            # a seed plan the user can never subscribe and the card stays locked.
+            {
+                'product': 'businessbuilder',
+                'tier': 'basic',
+                'name': 'BusinessBuilder 基础版',
+                'price': 199,
+                'period': 'monthly',
+                'max_users': 5,
+                'features': ['应用模板', '可视化编排', 'Webhook 集成', '500 次构建/月'],
+            },
+            {
+                'product': 'businessbuilder',
+                'tier': 'pro',
+                'name': 'BusinessBuilder 专业版',
+                'price': 699,
+                'period': 'monthly',
+                'max_users': 20,
+                'features': ['应用模板', '全部编排', 'API 集成', 'AI 助手', '优先构建', '无限构建'],
+            },
         ]
 
         for plan_data in plans:
