@@ -1,0 +1,159 @@
+# ============================================================================
+# fipai-account (07Account) — Docker Compose for Aliyun ECS single-host deploy
+# ----------------------------------------------------------------------------
+# Production: docker compose up -d --build
+# Local dev with bundled DB: docker compose --profile with-db up -d --build
+#
+# Required env:
+#   copy .env.example to .env, fill in DJANGO_SECRET_KEY + DJANGO_ALLOWED_HOSTS,
+#   JWT_* key pair, Postgres credentials, payment gateway keys (or leave
+#   ALIPAY_SANDBOX=true / WECHAT_SANDBOX=true + ALIYUN_SMS_SANDBOX=true for staging).
+#
+# Sub-domain routing (handled by host nginx — see fip_platform/DEPLOY_V1.md):
+#   account.fipai.cn:443 → 127.0.0.1:8001 (this stack)
+# ============================================================================
+
+services:
+
+  # --------------------------------------------------------------------------
+  # fipai-account — gunicorn WSGI
+  # --------------------------------------------------------------------------
+  account:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fipai-account:0.1.0
+    container_name: fipai-account
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      # ── Django core (Django settings.py enforces these in prod) ──
+      DJANGO_DEBUG: "False"
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?DJANGO_ALLOWED_HOSTS is required}
+      DJANGO_TRUST_X_FORWARDED_PROTO: "True"
+      DJANGO_SECURE_SSL_REDIRECT: "True"
+      DJANGO_SECURE_HSTS_SECONDS: "31536000"
+      DJANGO_SESSION_COOKIE_SECURE: "True"
+      DJANGO_CSRF_COOKIE_SECURE: "True"
+
+      # ── JWT signing (RS256 mandatory in prod) ──
+      JWT_ALGORITHM: "RS256"
+      JWT_KEY_ID: ${JWT_KEY_ID:?JWT_KEY_ID is required}
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?JWT_SIGNING_KEY is required}
+      JWT_VERIFYING_KEY: ${JWT_VERIFYING_KEY:?JWT_VERIFYING_KEY is required}
+
+      # ── TOTP seed encryption ──
+      TOTP_ENCRYPTION_KEY_ID: ${TOTP_ENCRYPTION_KEY_ID:?TOTP_ENCRYPTION_KEY_ID is required}
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:?TOTP_ENCRYPTION_KEY is required}
+      TOTP_PREVIOUS_ENCRYPTION_KEYS: ${TOTP_PREVIOUS_ENCRYPTION_KEYS:-{}}
+
+      # ── Postgres ──
+      USE_POSTGRES: "true"
+      PGSSLMODE: ${PGSSLMODE:-prefer}
+      PGSSLROOTCERT: ${PGSSLROOTCERT:-}
+      DB_NAME: ${DB_NAME:?DB_NAME is required}
+      DB_USER: ${DB_USER:?DB_USER is required}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+
+      # ── Payment + SMS + email ──
+      ALIPAY_APP_ID: ${ALIPAY_APP_ID:-}
+      ALIPAY_SELLER_ID: ${ALIPAY_SELLER_ID:-}
+      ALIPAY_PRIVATE_KEY: ${ALIPAY_PRIVATE_KEY:-}
+      ALIPAY_PUBLIC_KEY: ${ALIPAY_PUBLIC_KEY:-}
+      ALIPAY_SANDBOX: ${ALIPAY_SANDBOX:-false}
+      WECHAT_MCHID: ${WECHAT_MCHID:-}
+      WECHAT_SERIAL_NO: ${WECHAT_SERIAL_NO:-}
+      WECHAT_PRIVATE_KEY: ${WECHAT_PRIVATE_KEY:-}
+      WECHAT_APIV3_KEY: ${WECHAT_APIV3_KEY:-}
+      WECHAT_APPID: ${WECHAT_APPID:-}
+      WECHAT_SANDBOX: ${WECHAT_SANDBOX:-false}
+      ALIYUN_SMS_ACCESS_KEY_ID: ${ALIYUN_SMS_ACCESS_KEY_ID:-}
+      ALIYUN_SMS_ACCESS_KEY_SECRET: ${ALIYUN_SMS_ACCESS_KEY_SECRET:-}
+      ALIYUN_SMS_SIGN_NAME: ${ALIYUN_SMS_SIGN_NAME:-FIPAI}
+      ALIYUN_SMS_TEMPLATE_CODE_register: ${ALIYUN_SMS_TEMPLATE_CODE_register:-}
+      ALIYUN_SMS_TEMPLATE_CODE_login: ${ALIYUN_SMS_TEMPLATE_CODE_login:-}
+      ALIYUN_SMS_SANDBOX: ${ALIYUN_SMS_SANDBOX:-true}
+      EMAIL_BACKEND: ${EMAIL_BACKEND:-}
+      EMAIL_HOST: ${EMAIL_HOST:-}
+      EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_USE_TLS: ${EMAIL_USE_TLS:-true}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER:-}
+      EMAIL_FROM: ${EMAIL_FROM:-no-reply@fipai.cn}
+
+      # ── Wagtail CMS public site base ──
+      WAGTAILADMIN_BASE_URL: ${WAGTAILADMIN_BASE_URL:-https://fipai.cn}
+      BASE_URL: ${BASE_URL:-https://account.fipai.cn}
+
+      # ── Gunicorn tuning ──
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-3}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-60}
+      TZ: Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - fipai-net
+    volumes:
+      - staticfiles:/app/staticfiles
+      - media:/app/media
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "10"
+
+  # --------------------------------------------------------------------------
+  # Postgres (Aliyun RDS recommended in production — disable this profile)
+  # --------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: fipai-account-postgres
+    restart: unless-stopped
+    profiles: ["with-db"]
+    environment:
+      POSTGRES_DB: ${DB_NAME:-fipai}
+      POSTGRES_USER: ${DB_USER:-fipai}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      TZ: Asia/Shanghai
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - timezone=Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-fipai} -d ${DB_NAME:-fipai}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - fipai-net
+
+networks:
+  fipai-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+    driver: local
+  staticfiles:
+    driver: local
+  media:
+    driver: local
