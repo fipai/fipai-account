@@ -181,6 +181,10 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # CORS
 # =============================================================================
 CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get('DJANGO_CORS_ALLOWED_ORIGINS', '').split(',')
+    if origin.strip()
+] or [
     'https://fipai.cn',
     'https://home.fipai.cn',
     'http://localhost:5173',

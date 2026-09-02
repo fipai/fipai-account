@@ -25,18 +25,21 @@ services:
     image: fipai-account:0.1.0
     container_name: fipai-account
     restart: unless-stopped
+    env_file:
+      - .env
     ports:
-      - "8001:8001"
+      # Local dev default 18001 to avoid clashing with other tools on 8001
+      # (MiniMax Design IDE hardcodes 8001 on macOS). Switch to "8001:8001" if free.
+      - "18001:8001"
     environment:
       # ── Django core (Django settings.py enforces these in prod) ──
       DJANGO_DEBUG: "False"
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?DJANGO_ALLOWED_HOSTS is required}
-      DJANGO_TRUST_X_FORWARDED_PROTO: "True"
-      DJANGO_SECURE_SSL_REDIRECT: "True"
-      DJANGO_SECURE_HSTS_SECONDS: "31536000"
-      DJANGO_SESSION_COOKIE_SECURE: "True"
-      DJANGO_CSRF_COOKIE_SECURE: "True"
+      # DJANGO_TRUST_X_FORWARDED_PROTO / SECURE_SSL_REDIRECT / *_COOKIE_SECURE /
+      # HSTS_SECONDS are intentionally not set here so .env (env_file above) is
+      # the single source of truth. For prod (nginx front + HTTPS), set them all
+      # to True in .env. For local HTTP smoke test, set them to False.
 
       # ── JWT signing (RS256 mandatory in prod) ──
       JWT_ALGORITHM: "RS256"
@@ -104,7 +107,9 @@ services:
     networks:
       - fipai-net
     volumes:
-      - staticfiles:/app/staticfiles
+      # staticfiles volume intentionally not mounted for local: collectstatic
+      # must chown the dir to fipai user. In prod, mount an external volume
+      # and chown from the host, or run collectstatic at build time.
       - media:/app/media
     logging:
       driver: json-file

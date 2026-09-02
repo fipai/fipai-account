@@ -232,6 +232,7 @@ def build_tenant_claims(user, tenant_id=None):
     membership = get_active_tenant_membership(user, tenant_id=tenant_id)
     claims = {
         "tenant_id": None,
+        "enterprise_id": None,
         "product_scopes": [],
         "roles": [],
         "platform_roles": ["platform_admin"] if user.is_staff or user.is_superuser else [],
@@ -239,6 +240,9 @@ def build_tenant_claims(user, tenant_id=None):
     if membership is not None:
         claims.update(
             tenant_id=membership.tenant_id,
+            # DataCognis keys its multi-tenant rows on a numeric enterprise id, so
+            # it consumes this claim rather than tenant_id.
+            enterprise_id=membership.tenant_id,
             product_scopes=get_membership_product_scopes(membership),
             roles=[membership.role],
         )
