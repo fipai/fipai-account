@@ -100,14 +100,15 @@ class AccountDeletionRequest(models.Model):
 
 
 class SMSCode(models.Model):
-    """短信验证码记录"""
+    """验证码记录（手机短信 / 邮件 6 位码共用）"""
 
     PURPOSE_CHOICES = [
         ('register', '注册'),
         ('login', '登录'),
     ]
 
-    phone = models.CharField('手机号', max_length=20, db_index=True)
+    phone = models.CharField('手机号', max_length=20, blank=True)
+    email = models.EmailField('邮箱', blank=True, db_index=True)
     code = models.CharField('验证码', max_length=6)
     purpose = models.CharField('用途', max_length=20, choices=PURPOSE_CHOICES)
     is_used = models.BooleanField('已使用', default=False)
@@ -117,9 +118,14 @@ class SMSCode(models.Model):
     class Meta:
         db_table = 'accounts_sms_code'
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['phone', 'purpose', 'is_used']),
+            models.Index(fields=['email', 'purpose', 'is_used']),
+        ]
 
     def __str__(self):
-        return f"{self.phone} - {self.purpose}"
+        identifier = self.phone or self.email
+        return f"{identifier} - {self.purpose}"
 
     def is_expired(self):
         return timezone.now() > self.expires_at
@@ -227,3 +233,48 @@ class LoginChallenge(models.Model):
                 expires_at=now + lifetime,
             )
         return challenge, bearer
+
+
+class AccountProfile(models.Model):
+    """扩展用户档案：个人/企业区分、第三方登录标识、地域、头像。
+
+    Phase 9 引入：与 Django 默认 auth_user 一对一关联，
+    缺失不会破坏旧用户，调用方用 getattr(user, 'profile', None) 兜底。
+    """
+
+    ACCOUNT_TYPE_CHOICES = [
+        ('personal', '个人'),
+        ('enterprise', '企业'),
+    ]
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='profile',
+        verbose_name='用户',
+    )
+    account_type = models.CharField(
+        '账户类型', max_length=16, choices=ACCOUNT_TYPE_CHOICES, default='personal',
+    )
+    display_name = models.CharField('显示名', max_length=64, blank=True)
+    wechat_unionid = models.CharField(
+        '微信 unionid', max_length=64, blank=True, db_index=True,
+    )
+    wechat_openid = models.CharField(
+        '微信 openid', max_length=64, blank=True, db_index=True,
+    )
+    avatar_url = models.URLField(blank=True)
+    region = models.CharField(max_length=32, blank=True)
+    tos_accepted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'accounts_profile'
+        indexes = [
+            models.Index(fields=['wechat_unionid']),
+            models.Index(fields=['wechat_openid']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} ({self.account_type})"

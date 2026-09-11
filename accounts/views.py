@@ -1,4 +1,5 @@
 from typing import Optional
+from urllib.parse import urlencode
 
 from rest_framework import generics, status
 from rest_framework.response import Response
@@ -7,7 +8,10 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.views import TokenRefreshView
 from django.conf import settings
 from django.contrib.auth import get_user_model, authenticate
+from django.core.mail import send_mail
 from django.db import transaction
+from django.db.models import Q
+from django.http import HttpResponseRedirect
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -16,15 +20,21 @@ from .serializers import (
     RegisterSerializer, UserSerializer,
     SendCodeSerializer, RegisterPhoneSerializer, LoginPhoneSerializer,
     TenantSwitchSerializer,
+    RegisterPersonalSerializer, RegisterEnterpriseSerializer,
+    LoginEmailSerializer, SendEmailCodeSerializer,
 )
 from .models import (
     SMSCode, TwoFactorAuth, AccountDeletionRequest, LoginChallenge,
+    AccountProfile,
 )
 from .sms import generate_code, get_sms_client, SMS_CODE_EXPIRE_MINUTES, SMS_DAILY_LIMIT
 from .authentication import CookieOrHeaderJWTAuthentication
+from .oauth_wechat import WeChatOAuth, WeChatOAuthError
 import accounts.totp_service as totp_service
 from subscriptions.models import Subscription
 from payments.models import PaymentTransaction
+from teams.models import TeamMember
+from tenants.models import Tenant
 from django.contrib.auth.hashers import check_password
 
 User = get_user_model()
@@ -993,3 +1003,384 @@ class AccountDeleteConfirmView(generics.GenericAPIView):
         response = Response({'ok': True, 'message': '账户已注销'})
         _clear_sso_cookies(request, response)
         return response
+
+
+# =============================================================================
+# Phase 9 — 个人/企业注册 + 邮箱登录 + 微信扫码登录 + 邮箱验证码
+# =============================================================================
+
+import secrets
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_register_identifier(phone: str, email: str) -> str:
+    """Pick the unique identifier used for the User.username column."""
+    if phone:
+        return phone
+    return email.lower()
+
+
+def _consume_sms_code(identifier_value: str, code: str, purpose: str, *, by_phone: bool):
+    """原子取一条未用且未过期的验证码并标记已用。"""
+    lookup = {'phone': identifier_value} if by_phone else {'email': identifier_value.lower()}
+    lookup.update(code=code, purpose=purpose, is_used=False, expires_at__gt=timezone.now())
+    return (
+        SMSCode.objects.select_for_update()
+        .filter(**lookup)
+        .order_by('-created_at')
+        .first()
+    )
+
+
+def _build_personal_tenant(user, display_name: str) -> Tenant:
+    """Create a personal workspace tenant and an owner TeamMember."""
+    slug = f"personal-{user.id}-{secrets.token_hex(3)}"
+    tenant = Tenant.objects.create(
+        name=f"{display_name} 的个人空间",
+        slug=slug,
+        owner=user,
+        status='trial',
+        type='personal',
+        max_users=2,
+        max_api_calls=2000,
+    )
+    TeamMember.objects.create(tenant=tenant, user=user, role='owner', status='active')
+    return tenant
+
+
+class SendEmailCodeView(generics.GenericAPIView):
+    """发送邮箱 6 位验证码：POST /api/auth/send-email-code/
+
+    Body: { email, purpose: 'register'|'login' }
+    限速：同一邮箱每小时最多 EMAIL_CODE_HOURLY_LIMIT 封。
+    """
+    permission_classes = [AllowAny]
+    serializer_class = SendEmailCodeSerializer
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email'].strip().lower()
+        purpose = serializer.validated_data['purpose']
+
+        hourly_limit = getattr(settings, 'EMAIL_CODE_HOURLY_LIMIT', 5)
+        one_hour_ago = timezone.now() - timezone.timedelta(hours=1)
+        recent = SMSCode.objects.filter(
+            email=email,
+            purpose=purpose,
+            created_at__gte=one_hour_ago,
+        ).count()
+        if recent >= hourly_limit:
+            return Response(
+                {'error': f'发送过于频繁,请 {60} 分钟后再试'},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        code = generate_code()
+        SMSCode.objects.create(
+            email=email,
+            code=code,
+            purpose=purpose,
+            expires_at=timezone.now() + timezone.timedelta(minutes=SMS_CODE_EXPIRE_MINUTES),
+        )
+
+        masked = f"{email[:2]}***{email[-6:]}" if len(email) > 8 else email
+        try:
+            sent = send_mail(
+                subject='【飞谱智能】您的验证码',
+                message=f'您的验证码是: {code},{SMS_CODE_EXPIRE_MINUTES} 分钟内有效。如非本人操作请忽略。',
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+                fail_silently=False,
+            )
+        except Exception as e:
+            logger.exception("send_mail failed for %s", masked)
+            return Response(
+                {'error': f'邮件发送失败: {e}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        if settings.DEBUG:
+            logger.info('[Email code] %s purpose=%s code=%s', masked, purpose, code)
+        return Response({'ok': True, 'sent': sent})
+
+
+class RegisterPersonalView(generics.GenericAPIView):
+    """个人注册：POST /api/auth/register/personal/
+
+    Body: { name, phone|email, code, password, tos_accepted:true }
+    自动创建 personal tenant,签发 token 对。
+    """
+    permission_classes = [AllowAny]
+    serializer_class = RegisterPersonalSerializer
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        d = serializer.validated_data
+
+        phone = d.get('phone', '')
+        email = d.get('email', '')
+        identifier = _resolve_register_identifier(phone, email)
+        by_phone = bool(phone)
+
+        valid_code = _consume_sms_code(
+            phone or email, d['code'], purpose='register', by_phone=by_phone,
+        )
+        if valid_code is None:
+            return Response(
+                {'error': '验证码无效或已过期'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if User.objects.filter(username=identifier).exists():
+            return Response(
+                {'error': '该账号已注册,请直接登录'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = User.objects.create_user(
+            username=identifier,
+            email=email,
+            password=d['password'],
+            first_name=d['name'][:30],
+        )
+
+        valid_code.is_used = True
+        valid_code.save(update_fields=['is_used'])
+
+        AccountProfile.objects.create(
+            user=user,
+            account_type='personal',
+            display_name=d['name'],
+            tos_accepted_at=timezone.now(),
+        )
+        tenant = _build_personal_tenant(user, d['name'])
+
+        from .jwt import issue_token_pair
+
+        access, refresh = issue_token_pair(user)
+        response = Response(
+            {
+                'access': access,
+                'refresh': refresh,
+                'account_type': 'personal',
+                'tenant_id': tenant.id,
+                'tenant_name': tenant.name,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+        _set_sso_cookies(request, response, access, refresh)
+        return response
+
+
+class RegisterEnterpriseView(generics.GenericAPIView):
+    """企业注册：POST /api/auth/register/enterprise/
+
+    Body: { name, phone|email, code, password, tos_accepted,
+            company_name, uscc, scale, industry, legal_representative? }
+    """
+    permission_classes = [AllowAny]
+    serializer_class = RegisterEnterpriseSerializer
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        d = serializer.validated_data
+
+        phone = d.get('phone', '')
+        email = d.get('email', '')
+        identifier = _resolve_register_identifier(phone, email)
+        by_phone = bool(phone)
+
+        valid_code = _consume_sms_code(
+            phone or email, d['code'], purpose='register', by_phone=by_phone,
+        )
+        if valid_code is None:
+            return Response(
+                {'error': '验证码无效或已过期'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if User.objects.filter(username=identifier).exists():
+            return Response(
+                {'error': '该账号已注册,请直接登录'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        uscc = d['uscc'].upper()
+        if Tenant.objects.filter(uscc=uscc).exists():
+            return Response(
+                {'error': '该统一社会信用代码已注册'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = User.objects.create_user(
+            username=identifier,
+            email=email,
+            password=d['password'],
+            first_name=d['name'][:30],
+        )
+
+        valid_code.is_used = True
+        valid_code.save(update_fields=['is_used'])
+
+        AccountProfile.objects.create(
+            user=user,
+            account_type='enterprise',
+            display_name=d['name'],
+            tos_accepted_at=timezone.now(),
+        )
+
+        slug = f"ent-{uscc[-8:].lower()}"
+        tenant = Tenant.objects.create(
+            name=d['company_name'],
+            slug=slug,
+            owner=user,
+            status='trial',
+            type='enterprise',
+            uscc=uscc,
+            scale=d['scale'],
+            industry=d['industry'],
+            legal_representative=d.get('legal_representative', ''),
+        )
+        TeamMember.objects.create(tenant=tenant, user=user, role='owner', status='active')
+
+        from .jwt import issue_token_pair
+
+        access, refresh = issue_token_pair(user)
+        response = Response(
+            {
+                'access': access,
+                'refresh': refresh,
+                'account_type': 'enterprise',
+                'tenant_id': tenant.id,
+                'tenant_name': tenant.name,
+                'company_name': d['company_name'],
+            },
+            status=status.HTTP_201_CREATED,
+        )
+        _set_sso_cookies(request, response, access, refresh)
+        return response
+
+
+class LoginEmailView(generics.GenericAPIView):
+    """邮箱密码登录：POST /api/auth/login/email/
+
+    Body: { email, password }
+    """
+    permission_classes = [AllowAny]
+    serializer_class = LoginEmailSerializer
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email'].strip().lower()
+        password = serializer.validated_data['password']
+
+        # 用户可以用 email 或 username(手机号)登录
+        user = (
+            User.objects.filter(email__iexact=email)
+            .union(User.objects.filter(username__iexact=email))
+            .first()
+        )
+
+        if user is None or not user.check_password(password):
+            return Response(
+                {'error': '邮箱或密码错误'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not user.is_active:
+            return Response(
+                {'error': '账户已被停用'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if _requires_two_factor(user):
+            return _login_challenge_response(user)
+
+        from .jwt import issue_token_pair
+
+        access, refresh = issue_token_pair(user)
+        response = Response({'access': access, 'refresh': refresh})
+        _set_sso_cookies(request, response, access, refresh)
+        return response
+
+
+class WeChatLoginView(generics.GenericAPIView):
+    """GET /api/auth/oauth/wechat/?redirect=<frontend_url>
+
+    返回 JSON {authorize_url, configured};未配置时 authorize_url=None,前端降级。
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        oauth = WeChatOAuth()
+        if not oauth.is_configured:
+            return Response({
+                'configured': False,
+                'authorize_url': None,
+                'message': '微信扫码登录尚未配置,敬请期待',
+            })
+        state = secrets.token_urlsafe(16)
+        request.session['wechat_oauth_state'] = state
+        redirect = request.query_params.get('redirect', 'https://fipai.cn/')
+        request.session['wechat_oauth_redirect'] = redirect
+        return Response({
+            'configured': True,
+            'authorize_url': oauth.build_authorize_url(state),
+            'state': state,
+        })
+
+
+class WeChatOAuthCallbackView(generics.GenericAPIView):
+    """GET /api/auth/oauth/wechat/callback/?code=...&state=...
+
+    已绑定的 openid → 立即签 token 重定向回前端;未绑定 → 重定向带 wechat_openid
+    让前端走「绑定/注册」流程。
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        code = request.query_params.get('code')
+        state = request.query_params.get('state')
+        expected = request.session.pop('wechat_oauth_state', None)
+        redirect = request.session.pop('wechat_oauth_redirect', 'https://fipai.cn/')
+
+        if not code or not expected or state != expected:
+            return Response({'error': 'invalid state'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            token_info = WeChatOAuth().exchange_code(code)
+        except WeChatOAuthError as e:
+            return Response({'error': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        openid = token_info.get('openid', '')
+        unionid = token_info.get('unionid', '')
+
+        profile = AccountProfile.objects.filter(
+            Q(wechat_unionid=unionid) if unionid else Q(wechat_openid=openid)
+        ).filter(
+            Q(wechat_unionid=unionid) | Q(wechat_openid=openid)
+        ).first() if (unionid or openid) else None
+
+        if profile is None:
+            params = urlencode({
+                'wechat_openid': openid,
+                'wechat_unionid': unionid or '',
+                'next': redirect,
+            })
+            return HttpResponseRedirect(f"/login?from=wechat&{params}")
+
+        user = profile.user
+        from .jwt import issue_token_pair
+
+        access, refresh = issue_token_pair(user)
+        # 把 token 放到 URL fragment,前端用 useEffect 读取后调 useAuthStore().login()
+        fragment = urlencode({'access': access, 'refresh': refresh or ''})
+        return HttpResponseRedirect(f"{redirect}#{fragment}")

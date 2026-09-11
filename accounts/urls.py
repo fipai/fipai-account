@@ -6,6 +6,9 @@ from .views import (
     CookieTokenRefreshView, LogoutView, TenantListView, TenantSwitchView,
     TwoFactorAuthSetupView, TwoFactorAuthVerifyView, TwoFactorAuthDisableView, TwoFactorAuthStatusView,
     AccountDeletionRequestView, AccountDeletionStatusView, AccountDeleteConfirmView,
+    RegisterPersonalView, RegisterEnterpriseView,
+    LoginEmailView, SendEmailCodeView,
+    WeChatLoginView, WeChatOAuthCallbackView,
 )
 
 urlpatterns = [
@@ -16,6 +19,16 @@ urlpatterns = [
 
     # 邮箱注册（保留）
     path('register/', RegisterView.as_view(), name='auth-register'),
+
+    # Phase 9 — 个人 / 企业注册 + 邮箱登录 + 邮箱验证码
+    path('register/personal/', RegisterPersonalView.as_view(), name='auth-register-personal'),
+    path('register/enterprise/', RegisterEnterpriseView.as_view(), name='auth-register-enterprise'),
+    path('login/email/', LoginEmailView.as_view(), name='auth-login-email'),
+    path('send-email-code/', SendEmailCodeView.as_view(), name='auth-send-email-code'),
+
+    # Phase 9 — 微信开放平台 OAuth 扫码登录
+    path('oauth/wechat/', WeChatLoginView.as_view(), name='auth-oauth-wechat'),
+    path('oauth/wechat/callback/', WeChatOAuthCallbackView.as_view(), name='auth-oauth-wechat-callback'),
 
     # 登录（密码）
     path('login/', LoginView.as_view(), name='auth-login'),

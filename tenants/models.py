@@ -12,6 +12,19 @@ class Tenant(models.Model):
         ('cancelled', '已注销'),
     ]
 
+    TENANT_TYPE_CHOICES = [
+        ('personal', '个人租户'),
+        ('enterprise', '企业租户'),
+    ]
+
+    SCALE_CHOICES = [
+        ('1-50', '1-50 人'),
+        ('51-200', '51-200 人'),
+        ('201-500', '201-500 人'),
+        ('501-1000', '501-1000 人'),
+        ('1000+', '1000+ 人'),
+    ]
+
     name = models.CharField(max_length=100, verbose_name="租户名称")
     slug = models.SlugField(unique=True)
     domain = models.CharField(max_length=100, blank=True)
@@ -41,6 +54,20 @@ class Tenant(models.Model):
     max_users = models.IntegerField('最大用户数', default=5)
     max_api_calls = models.IntegerField('月 API 调用次数', default=10000)
 
+    # Phase 9 — 租户类型与企业字段
+    type = models.CharField(
+        '租户类型', max_length=16, choices=TENANT_TYPE_CHOICES, default='enterprise',
+    )
+    uscc = models.CharField(
+        '统一社会信用代码', max_length=32, blank=True, db_index=True,
+    )
+    scale = models.CharField(
+        '企业规模', max_length=16, choices=SCALE_CHOICES, blank=True,
+    )
+    industry = models.CharField('所属行业', max_length=64, blank=True)
+    legal_representative = models.CharField('法定代表人', max_length=64, blank=True)
+    verified_at = models.DateTimeField('认证时间', null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -57,6 +84,14 @@ class Tenant(models.Model):
     @property
     def is_active_subscription(self):
         return self.status == 'active'
+
+    @property
+    def is_personal(self):
+        return self.type == 'personal'
+
+    @property
+    def is_enterprise(self):
+        return self.type == 'enterprise'
 
 
 class Domain(models.Model):

@@ -4,11 +4,11 @@ Teams API Views
 import secrets
 from django.utils import timezone
 from django.db import transaction
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, generics
 from rest_framework.decorators import action
 from rest_framework.exceptions import MethodNotAllowed
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 
 from tenants.eligibility import eligible_tenant_filters, is_tenant_eligible
 from .models import TeamMember, Invitation
@@ -18,6 +18,7 @@ from .serializers import (
     InvitationSerializer,
     InvitationCreateSerializer,
 )
+from .services import send_invitation
 
 
 class TeamMemberViewSet(viewsets.ModelViewSet):
@@ -298,7 +299,12 @@ class InvitationViewSet(viewsets.ModelViewSet):
             expires_at=timezone.now() + timezone.timedelta(days=7)
         )
 
-        return Response(InvitationSerializer(invitation).data, status=status.HTTP_201_CREATED)
+        # Phase 9 — 实际发送邀请通知（失败不影响创建）
+        delivery = send_invitation(invitation)
+
+        data = InvitationSerializer(invitation).data
+        data['delivery'] = delivery
+        return Response(data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['post'], url_path='accept')
     def accept_invitation(self, request):
@@ -395,3 +401,39 @@ class InvitationViewSet(viewsets.ModelViewSet):
             invitation.save(update_fields=['status'])
 
         return Response({'message': '邀请已取消'})
+
+
+class InvitationPreviewView(generics.GenericAPIView):
+    """GET /api/teams/invitations/<code>/preview/
+
+    无需登录,任何人拿到邀请码可预览基本信息。前端 /invite/:code 落地页用。
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, code):
+        try:
+            inv = (
+                Invitation.objects.select_related('tenant', 'invited_by')
+                .get(code=code)
+            )
+        except Invitation.DoesNotExist:
+            return Response({'error': '邀请码无效'}, status=status.HTTP_404_NOT_FOUND)
+
+        if inv.expires_at < timezone.now():
+            return Response({'error': '邀请码已过期'}, status=status.HTTP_410_GONE)
+
+        inviter = inv.invited_by
+        inviter_name = (
+            getattr(getattr(inviter, 'profile', None), 'display_name', '')
+            or inviter.first_name
+            or inviter.username
+        )
+
+        return Response({
+            'code': inv.code,
+            'tenant_name': inv.tenant.name,
+            'inviter_name': inviter_name,
+            'role': inv.role,
+            'status': inv.status,
+            'expires_at': inv.expires_at.isoformat(),
+        })

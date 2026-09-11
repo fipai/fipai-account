@@ -246,6 +246,24 @@ def build_tenant_claims(user, tenant_id=None):
             product_scopes=get_membership_product_scopes(membership),
             roles=[membership.role],
         )
+    # Phase 9 — 个人/企业区分（向后兼容：缺 profile 的旧用户不写 claim）
+    profile = getattr(user, "profile", None)
+    if profile is not None:
+        claims["account_type"] = profile.account_type
+        claims["tenant_type"] = profile.account_type
+
+    # Cross-product SSO identity claims (Phase: FIP Account Identity Unification)
+    # 让 orcha.fipai.cn / cognis.fipai.cn / ops.fipai.cn 直接从 JWT 读到真名/邮箱/头像,
+    # 不再各自 hardcode demo 名字 (张三/张明远/stub-user-1)。
+    full_name = (user.get_full_name() or "").strip()
+    claims["name"] = full_name or user.username
+    claims["email"] = user.email or ""
+    claims["username"] = user.username
+    if profile is not None:
+        if profile.display_name:
+            claims["display_name"] = profile.display_name
+        if profile.avatar_url:
+            claims["avatar_url"] = profile.avatar_url
     return claims
 
 

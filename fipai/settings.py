@@ -426,6 +426,21 @@ EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
 EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'true').lower() in ('true', '1', 'yes')
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
 EMAIL_FROM = os.environ.get('EMAIL_FROM', 'no-reply@fipai.cn')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', EMAIL_FROM)
+
+# =============================================================================
+# 微信开放平台网站应用 OAuth（扫码登录）
+# Phase 9 — 申请后填入；空时按钮 graceful 降级
+# =============================================================================
+WECHAT_OPEN_APPID = os.environ.get('WECHAT_OPEN_APPID', '')
+WECHAT_OPEN_SECRET = os.environ.get('WECHAT_OPEN_SECRET', '')
+WECHAT_OPEN_REDIRECT_URI = os.environ.get(
+    'WECHAT_OPEN_REDIRECT_URI',
+    'https://account.fipai.cn/api/auth/oauth/wechat/callback/',
+)
+
+# 邮件验证码限速（同一邮箱每小时最多发送次数）
+EMAIL_CODE_HOURLY_LIMIT = int(os.environ.get('EMAIL_CODE_HOURLY_LIMIT', '5'))
 
 # =============================================================================
 # Django Admin 自定义样式

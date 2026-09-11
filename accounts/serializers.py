@@ -14,11 +14,14 @@ class UserSerializer(serializers.ModelSerializer):
     subscriptions = serializers.SerializerMethodField()
     phone = serializers.CharField(source='username', read_only=True)
     name = serializers.CharField(source='first_name', read_only=True)
+    display_name = serializers.SerializerMethodField()
+    avatar_url = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = (
             'id', 'username', 'email', 'first_name', 'phone', 'name',
+            'display_name', 'avatar_url',
             'date_joined', 'is_staff', 'is_active',
             'is_tenant_admin', 'tenant_id', 'tenant_name',
             'subscriptions'
@@ -50,6 +53,20 @@ class UserSerializer(serializers.ModelSerializer):
         from subscriptions.serializers import SubscriptionSerializer
         subs = Subscription.objects.filter(user=obj, status='active')
         return SubscriptionSerializer(subs, many=True).data
+
+    def get_display_name(self, obj):
+        """从 AccountProfile 拉显示名（Phase 9 字段）"""
+        profile = getattr(obj, 'profile', None)
+        if profile is None:
+            return None
+        return profile.display_name or None
+
+    def get_avatar_url(self, obj):
+        """从 AccountProfile 拉头像 URL（Phase 9 字段）"""
+        profile = getattr(obj, 'profile', None)
+        if profile is None:
+            return None
+        return profile.avatar_url or None
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -122,3 +139,71 @@ class TenantSwitchSerializer(serializers.Serializer):
     """Validate a requested tenant context without querying tenant existence."""
 
     tenant_id = serializers.IntegerField(min_value=1)
+
+
+# =============================================================================
+# Phase 9 — 个人/企业注册 + 邮箱密码登录
+# =============================================================================
+
+from django.core.validators import RegexValidator
+
+
+class RegisterPersonalSerializer(serializers.Serializer):
+    """POST /api/auth/register/personal/"""
+
+    name = serializers.CharField(max_length=64)
+    phone = serializers.CharField(
+        required=False, allow_blank=True, max_length=20,
+        validators=[RegexValidator(r'^1[3-9]\d{9}$', message='手机号格式不正确')],
+    )
+    email = serializers.EmailField(required=False, allow_blank=True)
+    code = serializers.CharField(max_length=6, min_length=6)
+    password = serializers.CharField(min_length=8, max_length=64, write_only=True)
+    tos_accepted = serializers.BooleanField()
+
+    def validate(self, attrs):
+        if not attrs.get('tos_accepted'):
+            raise serializers.ValidationError({'tos_accepted': '必须同意用户协议和隐私政策'})
+        phone = attrs.get('phone', '')
+        email = attrs.get('email', '')
+        if not phone and not email:
+            raise serializers.ValidationError('手机号和邮箱至少填一个')
+        if phone and email:
+            raise serializers.ValidationError('手机号和邮箱只能填一个')
+        return attrs
+
+
+class RegisterEnterpriseSerializer(RegisterPersonalSerializer):
+    """POST /api/auth/register/enterprise/"""
+
+    company_name = serializers.CharField(max_length=128)
+    uscc = serializers.CharField(
+        max_length=32,
+        validators=[RegexValidator(r'^[0-9A-Z]{18}$', message='统一社会信用代码为18位字母数字')],
+    )
+    scale = serializers.CharField(max_length=16)
+    industry = serializers.CharField(max_length=64)
+    legal_representative = serializers.CharField(
+        max_length=64, required=False, allow_blank=True, default='',
+    )
+
+    def validate_scale(self, value):
+        from tenants.models import Tenant
+        valid = {k for k, _ in Tenant.SCALE_CHOICES}
+        if value not in valid:
+            raise serializers.ValidationError(f'企业规模必须是 {sorted(valid)} 之一')
+        return value
+
+
+class LoginEmailSerializer(serializers.Serializer):
+    """POST /api/auth/login/email/"""
+
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True)
+
+
+class SendEmailCodeSerializer(serializers.Serializer):
+    """POST /api/auth/send-email-code/"""
+
+    email = serializers.EmailField()
+    purpose = serializers.ChoiceField(choices=['register', 'login'], default='register')
