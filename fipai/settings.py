@@ -180,21 +180,26 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # =============================================================================
 # CORS
 # =============================================================================
+# Previously this defaulted to seven localhost dev ports + fipai.cn / home.fipai.cn.
+# Combined with CORS_ALLOW_CREDENTIALS=True, that meant any dev port was treated
+# as trusted for cookie-bearing requests. A production deploy that forgot to set
+# DJANGO_CORS_ALLOWED_ORIGINS would still happily accept cross-site cookies.
+#
+# Now: env override required. The empty default fails closed in production
+# rather than open by accident.
 CORS_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.environ.get('DJANGO_CORS_ALLOWED_ORIGINS', '').split(',')
     if origin.strip()
-] or [
-    'https://fipai.cn',
-    'https://home.fipai.cn',
-    'http://localhost:5173',
-    'http://localhost:5174',
-    'http://localhost:5175',
-    'http://localhost:5176',
-    'http://localhost:5177',
-    'http://localhost:5178',
-    'http://localhost:5179',
 ]
+if not CORS_ALLOWED_ORIGINS and DEBUG:
+    # Dev: localhost variants are convenient. Logged loudly so it can't be
+    # confused with a production default.
+    CORS_ALLOWED_ORIGINS = [
+        'http://localhost:5173',
+        'http://localhost:5174',
+        'http://127.0.0.1:5173',
+    ]
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = [
     'accept', 'accept-encoding', 'authorization', 'content-type',

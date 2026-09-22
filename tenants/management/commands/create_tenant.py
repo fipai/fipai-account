@@ -11,7 +11,12 @@ class Command(BaseCommand):
         parser.add_argument('--slug', type=str, required=True, help='租户标识（用于子域名）')
         parser.add_argument('--domain', type=str, required=True, help='主域名（如 tenant1.example.com）')
         parser.add_argument('--email', type=str, help='管理员邮箱')
-        parser.add_argument('--password', type=str, help='管理员密码')
+        parser.add_argument(
+            '--password',
+            type=str,
+            required=True,
+            help='管理员密码（必填；曾有默认值 admin123，已删除以防运维误用造成公开可猜账号）',
+        )
         parser.add_argument('--phone', type=str, help='联系电话')
 
     def handle(self, *args, **options):
@@ -19,7 +24,7 @@ class Command(BaseCommand):
         slug = options['slug']
         domain = options['domain']
         email = options.get('email', f'admin@{domain}')
-        password = options.get('password', 'admin123')
+        password = options['password']
         phone = options.get('phone', '')
 
         # 检查租户是否已存在

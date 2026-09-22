@@ -39,15 +39,22 @@ def jwks(request):
 
 @require_GET
 def openid_configuration(request):
+    # This document describes the API surface, not just conformance. The
+    # previous values advertised OAuth2.1-anti-patterns (Resource Owner
+    # Password grant + 'none' client auth + implicit 'token' response type)
+    # which would have invited SPA-side secret exposure. We describe the
+    # Authorization Code + PKCE flow we actually run.
     return _public_json(
         {
             "issuer": settings.JWT_ISSUER,
             "jwks_uri": f"{settings.JWT_ISSUER}/.well-known/jwks.json",
-            "token_endpoint": f"{settings.JWT_ISSUER}/api/auth/login/",
-            "grant_types_supported": ["password", "refresh_token"],
-            "response_types_supported": ["token"],
+            "authorization_endpoint": f"{settings.JWT_ISSUER}/api/auth/authorize/",
+            "token_endpoint": f"{settings.JWT_ISSUER}/api/auth/token/",
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "response_types_supported": ["code"],
             "subject_types_supported": ["public"],
             "id_token_signing_alg_values_supported": [settings.JWT_ALGORITHM],
+            "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
         },
         max_age=3600,

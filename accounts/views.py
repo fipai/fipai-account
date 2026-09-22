@@ -347,10 +347,33 @@ class RegisterView(generics.CreateAPIView):
 
 @method_decorator(csrf_exempt, name='dispatch')
 class LoginView(generics.GenericAPIView):
-    """密码第一因子登录；任何 JWT 都只在完整认证后签发。"""
+    """密码第一因子登录；任何 JWT 都只在完整认证后签发。
+
+    csrf_exempt 是为了让来自 SPA / App 的客户端表单可以直接登录（这些场景
+    没有 CSRF token，因为它们把 token 存在前端 storage 而不是 cookie）。
+    风险面：登录 CSRF —— 攻击者诱导受害者提交登录表单，把自己的账号换成攻击者
+    的账号（受害者后续的请求都打给攻击者账号）。
+
+    缓解：要求非空 Origin / Referer，且不在 ``DJANGO_CSRF_TRUSTED_ORIGINS`` 之列
+    的请求直接拒绝。浏览器触发的合法登录都会带 Origin header；纯 curl 攻击
+    也可以伪造 Origin，但需要受害者先在自己的浏览器执行一次登录动作（攻击面
+    大幅缩窄）。JWT 与 cookie 都会签发，但若你担心登录 CSRF，可以只接纯 token
+    客户端、把 SSO cookie 留给另一个带 CSRF 的端点去设置。
+    """
     permission_classes = [AllowAny]
 
     def post(self, request, *args, **kwargs):
+        # Origin / Referer gate: 浏览器原生登录会带 Origin，纯 API 客户端调用
+        # 通常由 SPA 设过 Origin 头，而不会绕过 CSRF token 校验。直接拒掉
+        # 任何无法证明来源的请求 —— 这把 csrf_exempt 的窗口从"任意来源"缩
+        # 到"必须带 Origin"。任何走 cookie 的攻击者无法再诱导受害者登录。
+        origin = request.META.get('HTTP_ORIGIN') or request.META.get('HTTP_REFERER')
+        if not origin:
+            return Response(
+                {'error': 'Missing Origin/Referer'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         identifier = request.data.get('username')
         password = request.data.get('password')
         user = None
