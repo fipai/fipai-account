@@ -23,6 +23,7 @@ urlpatterns = [
     path('api/invoices/', include('invoices.urls')),
     # 审计日志
     path('api/audit/', include('audit.urls')),
+    path('api/content/', include('content.urls')),
     # OAuth2 Provider URLs
     path('oauth/', include('oauth2_provider.urls', namespace='oauth2_provider')),
 ]

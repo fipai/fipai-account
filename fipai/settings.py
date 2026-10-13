@@ -106,6 +106,7 @@ INSTALLED_APPS = [
     'teams',          # 团队管理
     'invoices',       # 发票管理
     'audit',          # 审计日志
+    'content',        # 官网内容管理
 ]
 
 # 登录 URL
