@@ -20,10 +20,16 @@ class Migration(migrations.Migration):
         ),
         migrations.AddIndex(
             model_name='smscode',
-            index=models.Index(fields=['phone', 'purpose', 'is_used']),
+            index=models.Index(
+                fields=['phone', 'purpose', 'is_used'],
+                name='acct_sms_phone_purpose_idx',
+            ),
         ),
         migrations.AddIndex(
             model_name='smscode',
-            index=models.Index(fields=['email', 'purpose', 'is_used']),
+            index=models.Index(
+                fields=['email', 'purpose', 'is_used'],
+                name='acct_sms_email_purpose_idx',
+            ),
         ),
     ]
