@@ -44,5 +44,19 @@ class DocItemViewSet(PublishedOrEditorialViewSet):
 class CaseStudyViewSet(PublishedOrEditorialViewSet):
     queryset = CaseStudy.objects.all()
     serializer_class = CaseStudySerializer
-    search_fields = ['title', 'title_en', 'company', 'company_en', 'industry', 'industry_en']
-    ordering_fields = ['featured', 'published_at', 'created_at', 'view_count']
+    search_fields = ['title', 'title_en', 'company', 'company_en', 'industry', 'industry_en', 'business_goal', 'business_goal_en']
+    ordering_fields = ['featured', 'display_order', 'published_at', 'created_at', 'view_count']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        for field in ('industry', 'case_type', 'business_goal'):
+            value = self.request.query_params.get(field)
+            if value:
+                queryset = queryset.filter(**{f'{field}__iexact': value})
+        product = self.request.query_params.get('product')
+        if product:
+            queryset = queryset.filter(products__contains=[product])
+        tag = self.request.query_params.get('tag')
+        if tag:
+            queryset = queryset.filter(business_tags__contains=[tag])
+        return queryset

@@ -101,7 +101,7 @@ class Command(BaseCommand):
                 }
                 _, made = DocItem.objects.get_or_create(product=product, slug=slug, defaults=data)
                 created['docs'] += int(made)
-        for slug, company, industry, description, product in CASES:
+        for order, (slug, company, industry, description, product) in enumerate(CASES, 1):
             data = {
                 'slug': slug, 'title': description, 'title_en': description, 'company': company, 'company_en': company,
                 'industry': industry, 'industry_en': industry, 'description': description, 'description_en': description,
@@ -112,7 +112,26 @@ class Command(BaseCommand):
                 'results': '减少重复录入，加快业务响应，让执行结果可以持续追踪。',
                 'results_en': 'Less repetitive work, faster response and measurable execution outcomes.',
                 'products': [product], 'status': PublicationStatus.PUBLISHED, 'published_at': now, 'featured': True,
+                'case_type': 'demo', 'business_goal': '减少重复劳动，让关键业务流程自动运行', 'business_goal_en': 'Reduce repetitive work and automate the critical business loop',
+                'company_size': '参考场景', 'business_tags': ['业务自动化', '人机协作'], 'display_order': order,
+                'workflow_before': '信息分散在多个系统、表格和人工沟通中，业务人员需要反复核对和传递。',
+                'workflow_before_en': 'Information was spread across systems, spreadsheets and manual communication.',
+                'workflow_after': '系统汇总业务数据，AI 提出方案，负责人确认关键决策，批准后的动作自动执行并追踪结果。',
+                'workflow_after_en': 'The system consolidates data, AI proposes options, people approve critical decisions, and approved actions are executed and tracked.',
+                'automation_steps': ['自动汇总业务数据', '识别问题并生成方案', '人工确认关键决策', '下发执行并追踪结果'],
+                'automation_steps_en': ['Consolidate business data', 'Identify issues and propose options', 'Review critical decisions', 'Execute and track outcomes'],
+                'human_role': '业务负责人负责确认优先级、审批关键方案和处理例外情况。',
+                'human_role_en': 'Business owners set priorities, approve critical options and handle exceptions.',
+                'metrics': [{'label': '重复录入减少', 'value': '80%', 'source': '场景示例'}],
+                'testimonial': '这是面向客户讨论的参考场景，正式上线前需要以客户实际数据校验结果。',
+                'testimonial_en': 'This is a reference scenario; results should be validated with customer data before publication.',
+                'testimonial_author': '飞谱智能参考场景',
             }
-            _, made = CaseStudy.objects.get_or_create(slug=slug, defaults=data)
+            case, made = CaseStudy.objects.get_or_create(slug=slug, defaults=data)
+            if not made and not case.business_goal:
+                for field, value in data.items():
+                    if field not in {'slug', 'status', 'published_at'}:
+                        setattr(case, field, value)
+                case.save()
             created['cases'] += int(made)
         self.stdout.write(self.style.SUCCESS(f"Seeded website content: {created['blogs']} blogs, {created['docs']} docs, {created['cases']} cases."))

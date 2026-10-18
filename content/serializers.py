@@ -33,6 +33,21 @@ class DocItemSerializer(ContentSerializer):
 
 
 class CaseStudySerializer(ContentSerializer):
+    def validate_metrics(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError('metrics must be a list.')
+        for metric in value:
+            if not isinstance(metric, dict) or not metric.get('label') or not metric.get('value'):
+                raise serializers.ValidationError('Each metric requires label and value.')
+        return value
+
+    def validate_automation_steps(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError('automation_steps must be a list.')
+        if any(not isinstance(step, (str, dict)) for step in value):
+            raise serializers.ValidationError('Each automation step must be text or an object.')
+        return value
+
     class Meta(ContentSerializer.Meta):
         model = CaseStudy
         fields = '__all__'

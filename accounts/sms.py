@@ -39,17 +39,18 @@ class AliyunSMS:
         self.sandbox = config.get('sandbox', True)
 
     def _get_client(self):
-        """获取阿里云 SMS 客户端"""
+        """获取阿里云 SMS 客户端(Tea SDK)"""
         try:
-            from aliyunsdkcore.client import AliyunClient
-            from aliyunsdkcore.profile import region_provider
-            region_provider.add_endpoint('dysmsapi', 'cn-hangzhou', 'dysmsapi.aliyuncs.com')
-            client = AliyunClient(
-                self.access_key_id,
-                self.access_key_secret,
-                'cn-hangzhou'
+            from alibabacloud_dysmsapi20170525.client import Client as DysmsapiClient
+            from alibabacloud_tea_openapi import models as open_api_models
+
+            config = open_api_models.Config(
+                access_key_id=self.access_key_id,
+                access_key_secret=self.access_key_secret,
+                region_id='cn-hangzhou',
+                endpoint='dysmsapi.aliyuncs.com',
             )
-            return client
+            return DysmsapiClient(config)
         except ImportError:
             logger.warning("阿里云 SMS SDK 未安装，使用 Mock 模式")
             return None
@@ -72,20 +73,24 @@ class AliyunSMS:
             return {'code': 0, 'message': 'success'}
 
         try:
-            from aliyunsdksms.request import SendSmsRequest
-
-            request = SendSmsRequest.SendSmsRequest()
-            request.set_PhoneNumbers(phone)
-            request.set_SignName(self.sign_name)
-            request.set_TemplateCode(template_code)
-            request.set_TemplateParam(f'{{"code":"{code}"}}')
+            from alibabacloud_dysmsapi20170525 import models as dysmsapi_models
 
             client = self._get_client()
             if not client:
                 return {'code': 0, 'message': 'success'}
 
-            response = client.do_action(request)
-            logger.info(f"SMS sent: {response}")
+            req = dysmsapi_models.SendSmsRequest(
+                phone_numbers=phone,
+                sign_name=self.sign_name,
+                template_code=template_code,
+                template_param=f'{{"code":"{code}"}}',
+            )
+            resp = client.send_sms(req)
+            status_code = getattr(resp.body, 'code', None)
+            if status_code and status_code != 'OK':
+                logger.error(f"SMS send failed: body={resp.body}")
+                return {'code': 1, 'message': f"alicloud: {status_code} {getattr(resp.body, 'message', '')}"}
+            logger.info(f"SMS sent: req_id={getattr(resp.body, 'request_id', '')}, phone={phone[:3]}****")
             return {'code': 0, 'message': 'success'}
 
         except Exception as e:

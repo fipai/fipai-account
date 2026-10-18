@@ -13,3 +13,6 @@ reportlab>=4.0
 cryptography==42.0.8
 python-alipay-sdk==3.4.0
 wechatpayv3==2.0.3
+# 阿里云短信(新版 Tea SDK,老 aliyunsdksms 不支持 Python 3.11+)
+alibabacloud_dysmsapi20170525>=2.0
+alibabacloud_tea_openapi>=0.3

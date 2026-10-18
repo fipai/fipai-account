@@ -119,8 +119,8 @@ class SMSCode(models.Model):
         db_table = 'accounts_sms_code'
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['phone', 'purpose', 'is_used']),
-            models.Index(fields=['email', 'purpose', 'is_used']),
+            models.Index(fields=['phone', 'purpose', 'is_used'], name='acct_sms_phone_purpose_idx'),
+            models.Index(fields=['email', 'purpose', 'is_used'], name='acct_sms_email_purpose_idx'),
         ]
 
     def __str__(self):

@@ -19,7 +19,7 @@ class DocItemAdmin(admin.ModelAdmin):
 
 @admin.register(CaseStudy)
 class CaseStudyAdmin(admin.ModelAdmin):
-    list_display = ('title', 'company', 'status', 'featured', 'published_at')
-    list_filter = ('status', 'featured', 'industry')
+    list_display = ('title', 'company', 'case_type', 'status', 'featured', 'published_at')
+    list_filter = ('status', 'case_type', 'featured', 'industry')
     search_fields = ('title', 'title_en', 'company', 'company_en', 'slug')
     prepopulated_fields = {'slug': ('title',)}

@@ -73,6 +73,11 @@ class DocItem(TimestampedContent):
 
 
 class CaseStudy(TimestampedContent):
+    class CaseType(models.TextChoices):
+        VERIFIED = 'verified', 'Verified customer case'
+        REFERENCE = 'reference', 'Reference scenario'
+        DEMO = 'demo', 'Demo scenario'
+
     slug = models.SlugField(max_length=160, unique=True)
     title = models.CharField(max_length=255)
     title_en = models.CharField(max_length=255, blank=True)
@@ -92,12 +97,30 @@ class CaseStudy(TimestampedContent):
     cover_image = models.URLField(max_length=1000, blank=True)
     logo_image = models.URLField(max_length=1000, blank=True)
     featured = models.BooleanField(default=False)
+    case_type = models.CharField(max_length=16, choices=CaseType.choices, default=CaseType.REFERENCE, db_index=True)
+    business_goal = models.CharField(max_length=255, blank=True)
+    business_goal_en = models.CharField(max_length=255, blank=True)
+    company_size = models.CharField(max_length=120, blank=True)
+    business_tags = models.JSONField(default=list, blank=True)
+    workflow_before = models.TextField(blank=True)
+    workflow_before_en = models.TextField(blank=True)
+    workflow_after = models.TextField(blank=True)
+    workflow_after_en = models.TextField(blank=True)
+    automation_steps = models.JSONField(default=list, blank=True)
+    automation_steps_en = models.JSONField(default=list, blank=True)
+    human_role = models.TextField(blank=True)
+    human_role_en = models.TextField(blank=True)
+    metrics = models.JSONField(default=list, blank=True)
+    testimonial = models.TextField(blank=True)
+    testimonial_en = models.TextField(blank=True)
+    testimonial_author = models.CharField(max_length=120, blank=True)
+    display_order = models.IntegerField(default=1)
     seo_title = models.CharField(max_length=255, blank=True)
     seo_description = models.TextField(blank=True)
     view_count = models.PositiveIntegerField(default=0)
 
     class Meta:
-        ordering = ['-featured', '-published_at', '-created_at']
+        ordering = ['-featured', 'display_order', '-published_at', '-created_at']
 
     def __str__(self):
         return self.title
