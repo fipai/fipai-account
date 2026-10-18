@@ -8,6 +8,7 @@ from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from .models import AuthSession
+from .request_context import TenantContextError, attach_tenant_validation
 
 
 class SessionJWTAuthentication(JWTAuthentication):
@@ -21,6 +22,10 @@ class SessionJWTAuthentication(JWTAuthentication):
             return None
 
         user, validated_token = authenticated
+        try:
+            attach_tenant_validation(request, validated_token)
+        except TenantContextError as exc:
+            raise AuthenticationFailed("Tenant context is invalid.") from exc
         try:
             sid = uuid.UUID(str(validated_token.get("sid")))
         except (TypeError, ValueError, AttributeError) as exc:

@@ -78,6 +78,7 @@ MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
+    'accounts.request_context.FIPRequestContextMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -204,8 +205,10 @@ if not CORS_ALLOWED_ORIGINS and DEBUG:
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = [
     'accept', 'accept-encoding', 'authorization', 'content-type',
-    'dnt', 'origin', 'user-agent', 'x-csrftoken', 'x-requested-with', 'x-tenant-id',
+    'dnt', 'origin', 'user-agent', 'x-csrftoken', 'x-requested-with',
+    'idempotency-key', 'x-correlation-id', 'x-tenant-id',
 ]
+CORS_EXPOSE_HEADERS = ['X-Correlation-Id']
 
 # =============================================================================
 # JWT signing contract
