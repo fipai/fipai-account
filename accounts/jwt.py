@@ -47,9 +47,20 @@ class FIPTokenBackend(TokenBackend):
                 raise TokenBackendError("Invalid token header") from exc
             if header.get("alg") != self.algorithm:
                 raise TokenBackendError("Token algorithm does not match configuration")
-            if header.get("kid") != settings.JWT_KEY_ID:
+            known_kids = {settings.JWT_KEY_ID} | set(
+                getattr(settings, "JWT_PREVIOUS_VERIFYING_KEYS", {})
+            )
+            if header.get("kid") not in known_kids:
                 raise TokenBackendError("Token key id does not match configuration")
         return super().decode(token, verify=verify)
+
+    def get_verifying_key(self, token):
+        header = jwt.get_unverified_header(token)
+        kid = header.get("kid")
+        previous_keys = getattr(settings, "JWT_PREVIOUS_VERIFYING_KEYS", {})
+        if kid in previous_keys:
+            return self._prepare_key(previous_keys[kid])
+        return super().get_verifying_key(token)
 
 
 def _new_token_backend() -> FIPTokenBackend:

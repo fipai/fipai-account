@@ -4,6 +4,7 @@ Django settings for FIP.AI Account System (account.fipai.cn)
 """
 import os
 import re
+import json
 from pathlib import Path
 from datetime import timedelta
 from django.core.exceptions import ImproperlyConfigured
@@ -219,6 +220,7 @@ JWT_ALGORITHM = os.environ.get('JWT_ALGORITHM', 'HS256' if DEBUG else '').strip(
 JWT_KEY_ID = os.environ.get('JWT_KEY_ID', 'fip-account-dev' if DEBUG else '').strip()
 JWT_SIGNING_KEY = os.environ.get('JWT_SIGNING_KEY', '').replace('\\n', '\n').strip()
 JWT_VERIFYING_KEY = os.environ.get('JWT_VERIFYING_KEY', '').replace('\\n', '\n').strip()
+_raw_previous_jwt_keys = os.environ.get('JWT_PREVIOUS_VERIFYING_KEYS', '{}').strip() or '{}'
 
 _insecure_jwt_values = {
     '', 'default', 'changeme', 'change-me', 'your-key-id',
@@ -257,6 +259,38 @@ else:
     _configured_public = _jwt_public_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
     if _derived_public != _configured_public:
         raise ImproperlyConfigured('JWT_SIGNING_KEY and JWT_VERIFYING_KEY do not form a key pair.')
+
+    try:
+        _previous_jwt_keys = json.loads(_raw_previous_jwt_keys)
+    except json.JSONDecodeError as exc:
+        raise ImproperlyConfigured('JWT_PREVIOUS_VERIFYING_KEYS must be a JSON object.') from exc
+    if not isinstance(_previous_jwt_keys, dict):
+        raise ImproperlyConfigured('JWT_PREVIOUS_VERIFYING_KEYS must be a JSON object.')
+
+    JWT_PREVIOUS_VERIFYING_KEYS = {}
+    for previous_kid, previous_pem in _previous_jwt_keys.items():
+        if not isinstance(previous_kid, str) or not re.fullmatch(r'[A-Za-z0-9._-]{1,128}', previous_kid):
+            raise ImproperlyConfigured('JWT_PREVIOUS_VERIFYING_KEYS contains an invalid key id.')
+        if previous_kid == JWT_KEY_ID:
+            raise ImproperlyConfigured('JWT_PREVIOUS_VERIFYING_KEYS must not contain the active key id.')
+        if not isinstance(previous_pem, str) or not previous_pem.strip():
+            raise ImproperlyConfigured(f'JWT previous verifying key {previous_kid} is empty.')
+        try:
+            previous_key = load_pem_public_key(previous_pem.replace('\\n', '\n').encode())
+        except (TypeError, ValueError) as exc:
+            raise ImproperlyConfigured(
+                f'JWT previous verifying key {previous_kid} must be valid PEM.'
+            ) from exc
+        if not isinstance(previous_key, RSAPublicKey):
+            raise ImproperlyConfigured(
+                f'JWT previous verifying key {previous_kid} must be an RSA public key.'
+            )
+        JWT_PREVIOUS_VERIFYING_KEYS[previous_kid] = previous_pem.replace('\\n', '\n').strip()
+
+if JWT_ALGORITHM == 'HS256':
+    if _raw_previous_jwt_keys not in ('', '{}'):
+        raise ImproperlyConfigured('JWT_PREVIOUS_VERIFYING_KEYS is supported only with RS256.')
+    JWT_PREVIOUS_VERIFYING_KEYS = {}
 
 if not JWT_KEY_ID or not re.fullmatch(r'[A-Za-z0-9._-]{1,128}', JWT_KEY_ID):
     raise ImproperlyConfigured('JWT_KEY_ID is missing or invalid.')

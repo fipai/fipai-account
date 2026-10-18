@@ -18,22 +18,26 @@ def _public_json(data: dict, max_age: int) -> JsonResponse:
     return response
 
 
+def _rsa_jwk(kid: str, pem: str) -> dict:
+    public_key = load_pem_public_key(pem.encode())
+    numbers = public_key.public_numbers()
+    return {
+        "kty": "RSA",
+        "kid": kid,
+        "use": "sig",
+        "alg": "RS256",
+        "n": _base64url_uint(numbers.n),
+        "e": _base64url_uint(numbers.e),
+    }
+
+
 @require_GET
 def jwks(request):
     keys = []
     if settings.JWT_ALGORITHM == "RS256":
-        public_key = load_pem_public_key(settings.JWT_VERIFYING_KEY.encode())
-        numbers = public_key.public_numbers()
-        keys.append(
-            {
-                "kty": "RSA",
-                "kid": settings.JWT_KEY_ID,
-                "use": "sig",
-                "alg": "RS256",
-                "n": _base64url_uint(numbers.n),
-                "e": _base64url_uint(numbers.e),
-            }
-        )
+        keys.append(_rsa_jwk(settings.JWT_KEY_ID, settings.JWT_VERIFYING_KEY))
+        for kid, pem in getattr(settings, "JWT_PREVIOUS_VERIFYING_KEYS", {}).items():
+            keys.append(_rsa_jwk(kid, pem))
     return _public_json({"keys": keys}, max_age=300)
 
 

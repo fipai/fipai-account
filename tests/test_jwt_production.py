@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import jwt
@@ -18,7 +19,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from accounts.jwt import issue_token_pair
+from accounts.jwt import FIPTokenBackend, issue_token_pair
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -121,6 +122,58 @@ class AccountJWTContractTest(TestCase):
             "https://account.fipai.cn/.well-known/jwks.json",
         )
 
+    def test_jwks_publishes_previous_public_key_during_rotation(self):
+        _, active_public_pem = _rsa_pair()
+        _, previous_public_pem = _rsa_pair()
+        with override_settings(
+            JWT_ALGORITHM="RS256",
+            JWT_VERIFYING_KEY=active_public_pem,
+            JWT_KEY_ID="account-prod-1",
+            JWT_PREVIOUS_VERIFYING_KEYS={"account-prod-0": previous_public_pem},
+        ):
+            response = self.client.get("/.well-known/jwks.json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            {key["kid"] for key in response.json()["keys"]},
+            {"account-prod-1", "account-prod-0"},
+        )
+
+    def test_previous_kid_is_accepted_during_rotation(self):
+        previous_private_pem, previous_public_pem = _rsa_pair()
+        now = datetime.now(timezone.utc)
+        old_token = jwt.encode(
+            {
+                "user_id": str(self.user.id),
+                "token_type": "access",
+                "jti": "old-jti",
+                "iat": int(now.timestamp()),
+                "exp": int((now + timedelta(minutes=5)).timestamp()),
+                "iss": "https://account.fipai.cn",
+                "aud": "fip-api",
+                "tenant_id": "tenant-1",
+            },
+            previous_private_pem,
+            algorithm="RS256",
+            headers={"kid": "account-prod-0"},
+        )
+        with override_settings(
+            JWT_ALGORITHM="RS256",
+            JWT_VERIFYING_KEY=previous_public_pem,
+            JWT_KEY_ID="account-prod-1",
+            JWT_PREVIOUS_VERIFYING_KEYS={"account-prod-0": previous_public_pem},
+        ):
+            backend = FIPTokenBackend(
+                algorithm="RS256",
+                signing_key=previous_private_pem,
+                verifying_key=previous_public_pem,
+                audience="fip-api",
+                issuer="https://account.fipai.cn",
+            )
+            decoded = backend.decode(old_token)
+
+        self.assertEqual(decoded["jti"], "old-jti")
+
 
 class AccountJWTProductionSettingsTest(TestCase):
     @classmethod
@@ -138,6 +191,7 @@ class AccountJWTProductionSettingsTest(TestCase):
             "JWT_SIGNING_KEY",
             "JWT_VERIFYING_KEY",
             "JWT_KEY_ID",
+            "JWT_PREVIOUS_VERIFYING_KEYS",
             "TOTP_ENCRYPTION_KEY_ID",
             "TOTP_ENCRYPTION_KEY",
             "TOTP_PREVIOUS_ENCRYPTION_KEYS",
@@ -184,3 +238,10 @@ class AccountJWTProductionSettingsTest(TestCase):
             environment.update(changes)
             result = self._run_settings(environment)
             self.assertNotEqual(result.returncode, 0, msg=changes)
+
+    def test_production_rejects_invalid_previous_jwt_key_config(self):
+        for previous_keys in ("[]", "{invalid", json.dumps({"account-prod-1": "old"})):
+            environment = self._valid_environment()
+            environment["JWT_PREVIOUS_VERIFYING_KEYS"] = previous_keys
+            result = self._run_settings(environment)
+            self.assertNotEqual(result.returncode, 0, msg=previous_keys)
