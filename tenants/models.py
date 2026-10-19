@@ -1,5 +1,6 @@
 from django.db import models
 from django.conf import settings
+import uuid
 
 
 class Tenant(models.Model):
@@ -27,6 +28,9 @@ class Tenant(models.Model):
 
     name = models.CharField(max_length=100, verbose_name="租户名称")
     slug = models.SlugField(unique=True)
+    # Stable cross-product identity. The legacy numeric id remains the
+    # DataCognis enterprise_id; this UUID is used by DecisionOps.
+    tenant_uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     domain = models.CharField(max_length=100, blank=True)
 
     # 所有者

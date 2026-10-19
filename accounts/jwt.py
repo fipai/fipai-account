@@ -243,6 +243,7 @@ def build_tenant_claims(user, tenant_id=None):
     membership = get_active_tenant_membership(user, tenant_id=tenant_id)
     claims = {
         "tenant_id": None,
+        "tenant_uuid": None,
         "enterprise_id": None,
         "product_scopes": [],
         "roles": [],
@@ -251,6 +252,7 @@ def build_tenant_claims(user, tenant_id=None):
     if membership is not None:
         claims.update(
             tenant_id=membership.tenant_id,
+            tenant_uuid=str(membership.tenant.tenant_uuid),
             # DataCognis keys its multi-tenant rows on a numeric enterprise id, so
             # it consumes this claim rather than tenant_id.
             enterprise_id=membership.tenant_id,
@@ -282,6 +284,7 @@ def build_tenant_summary(membership):
     """Serialize the tenant context exposed by the tenant-list endpoint."""
     return {
         "tenant_id": membership.tenant_id,
+        "tenant_uuid": str(membership.tenant.tenant_uuid),
         "tenant_name": membership.tenant.name,
         "roles": [membership.role],
         "product_scopes": get_membership_product_scopes(membership),

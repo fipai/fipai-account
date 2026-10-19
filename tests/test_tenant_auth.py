@@ -122,6 +122,7 @@ class TenantAuthTest(TestCase):
         refresh_claims = RefreshToken(response.data["refresh"])
         for claims in (access_claims, refresh_claims):
             self.assertEqual(claims["tenant_id"], self.tenant_b.id)
+            self.assertEqual(claims["tenant_uuid"], str(self.tenant_b.tenant_uuid))
             self.assertEqual(claims["roles"], ["viewer"])
             self.assertEqual(claims["product_scopes"], ["datacognis"])
         self.assertTrue(response.cookies["fip_access_token"]["httponly"])
@@ -187,6 +188,7 @@ class TenantAuthTest(TestCase):
         self.assertEqual(response.status_code, 200)
         claims = AccessToken(response.data["access"])
         self.assertEqual(claims["tenant_id"], expected.tenant_id)
+        self.assertEqual(claims["tenant_uuid"], str(expected.tenant.tenant_uuid))
         self.assertEqual(claims["roles"], [expected.role])
 
     def test_businessbuilder_is_a_valid_subscription_product(self):

@@ -14,12 +14,12 @@ class TenantSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tenant
         fields = [
-            'id', 'name', 'slug', 'domain', 'owner', 'owner_name', 'owner_email',
+            'id', 'tenant_uuid', 'name', 'slug', 'domain', 'owner', 'owner_name', 'owner_email',
             'status', 'is_active', 'current_plan', 'logo', 'description',
             'max_users', 'max_api_calls', 'created_at', 'updated_at'
         ]
         read_only_fields = [
-            'id', 'owner', 'status', 'is_active', 'current_plan',
+            'id', 'tenant_uuid', 'owner', 'status', 'is_active', 'current_plan',
             'max_users', 'max_api_calls', 'created_at', 'updated_at'
         ]
 
