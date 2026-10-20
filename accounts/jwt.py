@@ -1,7 +1,8 @@
 """JWT signing, validation, and tenant-aware claim helpers."""
 from __future__ import annotations
 
-from datetime import datetime, timezone as datetime_timezone
+from datetime import datetime, timedelta, timezone as datetime_timezone
+import re
 from typing import Any
 import uuid
 
@@ -242,6 +243,8 @@ def build_tenant_claims(user, tenant_id=None):
     """Build tenant claims separately from platform-wide authorization claims."""
     membership = get_active_tenant_membership(user, tenant_id=tenant_id)
     claims = {
+        "principal_type": "user",
+        "service_name": None,
         "tenant_id": None,
         "tenant_uuid": None,
         "enterprise_id": None,
@@ -320,6 +323,46 @@ def issue_token_pair(user, tenant_id=None):
         access = str(refresh.access_token)
         refresh_string = str(refresh)
     return access, refresh_string
+
+
+def issue_service_access_token(service_name: str, tenant_id: int, product_scopes: list[str]) -> str:
+    """Issue a short-lived, tenant-bound token for an allowlisted internal service."""
+    from tenants.models import Tenant
+
+    if not isinstance(service_name, str) or not re.fullmatch(r"[a-z][a-z0-9-]{1,63}", service_name):
+        raise ValueError("Invalid service name")
+    configured_scopes = getattr(settings, "FIP_SERVICE_JWT_ALLOWLIST", {}).get(service_name)
+    if not isinstance(configured_scopes, list):
+        raise ValueError("Service is not configured")
+    if not isinstance(product_scopes, list) or not product_scopes:
+        raise ValueError("At least one product scope is required")
+    scopes = sorted(set(product_scopes))
+    if any(
+        not isinstance(scope, str) or not re.fullmatch(r"[a-z][a-z0-9-]*", scope)
+        for scope in scopes
+    ) or not set(scopes).issubset(configured_scopes):
+        raise ValueError("Service scope is not allowed")
+    tenant = Tenant.objects.filter(pk=tenant_id, is_active=True).first()
+    if tenant is None:
+        raise ValueError("Tenant is unavailable")
+
+    issued_at = datetime.now(datetime_timezone.utc)
+    payload = {
+        "token_type": "access",
+        "jti": str(uuid.uuid4()),
+        "principal_type": "service",
+        "service_name": service_name,
+        "user_id": None,
+        "tenant_id": tenant.id,
+        "tenant_uuid": str(tenant.tenant_uuid),
+        "enterprise_id": tenant.id,
+        "product_scopes": scopes,
+        "roles": [],
+        "platform_roles": [],
+        "iat": int(issued_at.timestamp()),
+        "exp": int((issued_at + timedelta(seconds=settings.FIP_SERVICE_JWT_LIFETIME_SECONDS)).timestamp()),
+    }
+    return _new_token_backend().encode(payload)
 
 
 def revoke_all_auth_sessions(user, reason: str) -> int:
