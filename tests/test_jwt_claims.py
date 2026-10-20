@@ -86,6 +86,8 @@ class JWTClaimsTest(TestCase):
 
         claims = self._decode_jwt_claims(access_token)
         self.assertIn("user_id", claims)
+        self.assertEqual(claims["principal_type"], "user")
+        self.assertIsNone(claims["service_name"])
         # user_id in JWT is typically a string representation
         self.assertEqual(str(claims["user_id"]), str(self.user_model.objects.get(username=phone).id))
 

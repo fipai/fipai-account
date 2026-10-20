@@ -19,7 +19,8 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from accounts.jwt import FIPTokenBackend, issue_token_pair
+from accounts.jwt import FIPTokenBackend, issue_service_access_token, issue_token_pair
+from tenants.models import Tenant
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -91,6 +92,39 @@ class AccountJWTContractTest(TestCase):
         staff_claims = self._decode(staff_access)
         self.assertEqual(staff_claims["roles"], [])
         self.assertEqual(staff_claims["platform_roles"], ["platform_admin"])
+
+    @override_settings(
+        FIP_SERVICE_JWT_ALLOWLIST={"decisionops": ["businessbuilder"]},
+    )
+    def test_service_access_token_has_scoped_non_user_identity(self):
+        tenant = Tenant.objects.create(name="Service Tenant", slug="service-tenant")
+
+        token = issue_service_access_token(
+            service_name="decisionops",
+            tenant_id=tenant.id,
+            product_scopes=["businessbuilder"],
+        )
+        claims = self._decode(token)
+
+        self.assertEqual(claims["principal_type"], "service")
+        self.assertEqual(claims["service_name"], "decisionops")
+        self.assertIsNone(claims["user_id"])
+        self.assertEqual(claims["tenant_id"], tenant.id)
+        self.assertEqual(claims["tenant_uuid"], str(tenant.tenant_uuid))
+        self.assertEqual(claims["product_scopes"], ["businessbuilder"])
+        self.assertEqual(claims["roles"], [])
+        self.assertEqual(claims["platform_roles"], [])
+        self.assertEqual(claims["token_type"], "access")
+
+    def test_service_access_token_rejects_unconfigured_scope(self):
+        tenant = Tenant.objects.create(name="Service Tenant", slug="service-tenant")
+
+        with self.assertRaises(ValueError):
+            issue_service_access_token(
+                service_name="decisionops",
+                tenant_id=tenant.id,
+                product_scopes=["datacognis"],
+            )
 
     def test_jwks_and_openid_publish_only_rsa_public_material(self):
         _, public_pem = _rsa_pair()

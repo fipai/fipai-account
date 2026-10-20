@@ -221,6 +221,24 @@ JWT_KEY_ID = os.environ.get('JWT_KEY_ID', 'fip-account-dev' if DEBUG else '').st
 JWT_SIGNING_KEY = os.environ.get('JWT_SIGNING_KEY', '').replace('\\n', '\n').strip()
 JWT_VERIFYING_KEY = os.environ.get('JWT_VERIFYING_KEY', '').replace('\\n', '\n').strip()
 _raw_previous_jwt_keys = os.environ.get('JWT_PREVIOUS_VERIFYING_KEYS', '{}').strip() or '{}'
+_raw_service_jwt_allowlist = os.environ.get('FIP_SERVICE_JWT_ALLOWLIST', '{}').strip() or '{}'
+try:
+    FIP_SERVICE_JWT_ALLOWLIST = json.loads(_raw_service_jwt_allowlist)
+except json.JSONDecodeError as exc:
+    raise ImproperlyConfigured('FIP_SERVICE_JWT_ALLOWLIST must be a JSON object.') from exc
+if not isinstance(FIP_SERVICE_JWT_ALLOWLIST, dict):
+    raise ImproperlyConfigured('FIP_SERVICE_JWT_ALLOWLIST must be a JSON object.')
+for _service_name, _service_scopes in FIP_SERVICE_JWT_ALLOWLIST.items():
+    if not isinstance(_service_name, str) or not re.fullmatch(r'[a-z][a-z0-9-]{1,63}', _service_name):
+        raise ImproperlyConfigured('FIP_SERVICE_JWT_ALLOWLIST contains an invalid service name.')
+    if not isinstance(_service_scopes, list) or not all(
+        isinstance(scope, str) and re.fullmatch(r'[a-z][a-z0-9-]*', scope)
+        for scope in _service_scopes
+    ):
+        raise ImproperlyConfigured('FIP_SERVICE_JWT_ALLOWLIST scopes must be string arrays.')
+FIP_SERVICE_JWT_LIFETIME_SECONDS = int(os.environ.get('FIP_SERVICE_JWT_LIFETIME_SECONDS', '300'))
+if not 60 <= FIP_SERVICE_JWT_LIFETIME_SECONDS <= 900:
+    raise ImproperlyConfigured('FIP_SERVICE_JWT_LIFETIME_SECONDS must be between 60 and 900.')
 
 _insecure_jwt_values = {
     '', 'default', 'changeme', 'change-me', 'your-key-id',
