@@ -100,7 +100,13 @@ class Command(BaseCommand):
             return plan
         if dry_run:
             self.stdout.write(f'[dry-run] 将新建套餐: FIP.AI {label} 企业版')
-            return SubscriptionPlan(product=product, tier='enterprise')
+            return SubscriptionPlan(
+                product=product,
+                tier='enterprise',
+                period='yearly',
+                name=f'FIP.AI {label} 企业版',
+                price=0,
+            )
         plan = SubscriptionPlan.objects.create(
             product=product,
             tier='enterprise',
