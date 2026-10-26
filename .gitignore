@@ -10,5 +10,5 @@ node_modules/
 .DS_Store
 
 # iCloud conflict placeholders (restored by sync; inert)
-"Dockerfile 2"
-"docker-compose 2.yml"
+Dockerfile 2
+docker-compose 2.yml
