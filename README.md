@@ -132,6 +132,19 @@ ALIBABA_SMS_SANDBOX=false
 | POST | /api/teams/invitations/accept/ | 接受邀请 |
 | POST | /api/teams/invitations/{id}/cancel/ | 取消邀请 |
 
+## 服务 JWT 运维发放
+
+服务 JWT 不通过公开 HTTP API 发放。部署或密钥管理流程可在 Account 环境中执行：
+
+```bash
+python manage.py issue_service_token \
+  --service decisionops \
+  --tenant-id 123 \
+  --scope businessbuilder
+```
+
+命令只接受 `FIP_SERVICE_JWT_ALLOWLIST` 中配置的服务和产品 scope，并要求租户处于 active 状态。Token 使用 `FIP_SERVICE_JWT_LIFETIME_SECONDS` 的短时有效期，只输出一次到标准输出，不写入数据库或日志；下游服务应通过 secret manager 注入 `DECISIONOPS_BIZGEN_SERVICE_TOKEN`、`DATACOGNIS_SERVICE_TOKEN` 等配置。
+
 ## 数据库
 
 使用 SQLite 开发，PostgreSQL 生产（`USE_POSTGRES=true` 环境变量切换）
